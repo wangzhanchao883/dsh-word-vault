@@ -14,7 +14,7 @@
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
-import { dirname, join } from "node:path";
+import { dirname, join, basename, extname } from "node:path";
 
 import { DEFAULT_CONFIG, resolveConfig } from "./config.mjs";
 import {
@@ -48,8 +48,9 @@ import { exportCardSet, htmlToPdf, htmlToPng, findBrowser } from "./cards.mjs";
 import { generateExam, buildPaperHtml, extractSentenceFromContext } from "./examgen.mjs";
 import { startExamServer, parseChoice, EXAM_LETTERS } from "./exam.mjs";
 import { translateWords } from "./translate.mjs";
+import { findPhotos, scanPhotos, scannerScript, photoHash, loadProgress } from "./photos.mjs";
 import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 
 export const name = "dsh-word-vault";
 export const inject = ["tools"];
@@ -98,6 +99,15 @@ const settingsSchema = z.object({
   examRecheckRatio: z.number().min(0).max(1).default(DEFAULT_CONFIG.exam.recheckRatio),
   examMinutes: z.number().min(1).max(600).default(DEFAULT_CONFIG.exam.minutes),
   examBatchSize: z.number().min(1).max(12).default(DEFAULT_CONFIG.exam.batchSize),
+  photoDir: z.string().default(DEFAULT_CONFIG.photo.dir),
+  photoOutDir: z.string().default(DEFAULT_CONFIG.photo.outDir),
+  photoRecursive: z.boolean().default(DEFAULT_CONFIG.photo.recursive),
+  photoKeepCrops: z.boolean().default(DEFAULT_CONFIG.photo.keepCrops),
+  photoSatMin: z.number().min(5).max(200).default(DEFAULT_CONFIG.photo.satMin),
+  photoPadUp: z.number().min(0).max(200).default(DEFAULT_CONFIG.photo.padUp),
+  photoMaxCropH: z.number().min(40).max(600).default(DEFAULT_CONFIG.photo.maxCropH),
+  photoMinDarkSpread: z.number().min(0).max(1).default(DEFAULT_CONFIG.photo.minDarkSpread),
+  photoMaxPerRun: z.number().min(1).max(50).default(DEFAULT_CONFIG.photo.maxPerRun),
 });
 
 /** 插件嵌套结构 → 扁平 settings 结构 */
@@ -135,6 +145,15 @@ function toFlat(config) {
     examRecheckRatio: config.exam.recheckRatio,
     examMinutes: config.exam.minutes,
     examBatchSize: config.exam.batchSize,
+    photoDir: config.photo.dir,
+    photoOutDir: config.photo.outDir,
+    photoRecursive: config.photo.recursive,
+    photoKeepCrops: config.photo.keepCrops,
+    photoSatMin: config.photo.satMin,
+    photoPadUp: config.photo.padUp,
+    photoMaxCropH: config.photo.maxCropH,
+    photoMinDarkSpread: config.photo.minDarkSpread,
+    photoMaxPerRun: config.photo.maxPerRun,
   };
 }
 
@@ -180,6 +199,17 @@ function fromFlat(flat) {
       recheckRatio: flat.examRecheckRatio,
       minutes: flat.examMinutes,
       batchSize: flat.examBatchSize,
+    },
+    photo: {
+      dir: flat.photoDir,
+      outDir: flat.photoOutDir,
+      recursive: flat.photoRecursive,
+      keepCrops: flat.photoKeepCrops,
+      satMin: flat.photoSatMin,
+      padUp: flat.photoPadUp,
+      maxCropH: flat.photoMaxCropH,
+      minDarkSpread: flat.photoMinDarkSpread,
+      maxPerRun: flat.photoMaxPerRun,
     },
   });
 }
@@ -943,6 +973,148 @@ export function apply(ctx, input = {}) {
         questions: r.questions,
         files: r.files,
         note: "试卷与答案分开两个文件:打印试卷给人做,答案自己留着;做完用 wordvault_exam_answer 逐题录分会自动回写掌握度",
+      });
+    },
+  }));
+
+  // ---------------- P4 照片通道 ----------------
+  const photoProgressFile = () => join(runtimeDir(), "photo-progress.json");
+
+  /** 找出这批照片里哪些还没入过库(按内容 hash) */
+  const ingestedPhotoHashes = () => {
+    const f = join(runtimeDir(), "photo-ingested.json");
+    return loadProgress(f);
+  };
+  const markPhotoIngested = (hash, info) => {
+    const f = join(runtimeDir(), "photo-ingested.json");
+    const data = ingestedPhotoHashes();
+    data[hash] = { ...info, ingestedAt: new Date().toISOString() };
+    writeFileSync(f, JSON.stringify(data, null, 2), "utf8");
+  };
+
+  // ---------------- 工具 12:扫描照片找标记词 ----------------
+  ctx.tools.register(textTool({
+    name: "wordvault_scan_photo",
+    description:
+      "扫描作业/课本照片,定位「被标记的印刷词」候选区域:识别各色荧光笔与红笔的红线/勾/圈(铅笔与黑色手写不参与),按行合并后裁剪,并输出一张联络图。返回联络图路径——请用读图能力看这张联络图,只挑出被标记的**印刷体**单词/短语(跳过手写与插图),再调 wordvault_add 入库(每张照片一次调用,便于整张撤销)。可传单张照片路径,也可扫 photoDir 目录里未处理的新照片。",
+    parameters: {
+      path: { type: "string", description: "单张照片的绝对路径(与 folder 二选一)" },
+      folder: { type: "string", description: "照片目录,缺省用设置里的 photoDir" },
+      force: { type: "boolean", description: "已扫过的照片也重新扫(缺省 false,按内容 hash 跳过)" },
+      maxPerRun: { type: "number", description: "本次最多处理几张新照片,缺省用设置里的 photoMaxPerRun" },
+    },
+    async execute(args) {
+      open();
+      if (!liveConfig.enabled) return "插件已停用(enabled=false)。";
+      const single = String(args.path || "").trim();
+      const folder = single ? dirname(single) : String(args.folder || liveConfig.photo.dir);
+      if (!single && !existsSync(folder)) {
+        mkdirSync(folder, { recursive: true });
+        return json({
+          ok: true,
+          folder,
+          photos: 0,
+          message: `照片目录已创建,把照片丢进去再叫我扫:${folder}`,
+          note: "也可以直接在对话里发照片,我现场处理。",
+        });
+      }
+      const photos = single ? [single] : findPhotos(folder, { recursive: liveConfig.photo.recursive });
+      if (!photos.length) {
+        return json({ ok: true, folder, photos: 0, message: `这个目录里没有照片(jpg/jpeg/png/webp/bmp):${folder}` });
+      }
+
+      const out = await scanPhotos({
+        photos,
+        outDir: liveConfig.photo.outDir,
+        progressFile: photoProgressFile(),
+        force: !!args.force,
+        keepCrops: liveConfig.photo.keepCrops,
+        maxPerRun: Math.max(1, Number(args.maxPerRun) || liveConfig.photo.maxPerRun),
+        options: {
+          satMin: liveConfig.photo.satMin,
+          padUp: liveConfig.photo.padUp,
+          maxCropH: liveConfig.photo.maxCropH,
+          minDarkSpread: liveConfig.photo.minDarkSpread,
+        },
+        logger: ctx.logger,
+      });
+
+      const ingested = ingestedPhotoHashes();
+      const list = out.results.map((r) => ({
+        photo: basename(r.photo),
+        photoPath: r.photo,
+        status: r.status,
+        regions: r.regions,
+        sheet: r.sheets && r.sheets[0] ? r.sheets[0] : null,
+        cropDir: r.cropDir,
+        alreadyIngested: !!(r.hash && ingested[r.hash]),
+        source: `照片 ${basename(r.photo)}（标记的印刷词）`,
+        error: r.error,
+      }));
+
+      return json({
+        ok: true,
+        folder,
+        total: out.total,
+        scanned: out.scanned,
+        reused: out.reused,
+        pending: out.pending,
+        photos: list,
+        outDir: liveConfig.photo.outDir,
+        next: [
+          "1) 逐张读 sheet(联络图):图上每块都标了 rN/y 范围/命中理由,只认被标记的【印刷体】词或短语,跳过手写、红笔批注、插图。",
+          "2) 每张照片调一次 wordvault_add:把该照片识别出的词拼成多行文本传进去,source 用上面给的字符串——这样一张照片就是一条可整张撤销的记录。",
+          "3) 录完可调 wordvault_scan_photo 再确认(已入库的照片会标 alreadyIngested)。",
+        ],
+        note: out.pending ? `还有 ${out.pending} 张没扫,再叫一次继续。` : undefined,
+      });
+    },
+  }));
+
+  // ---------------- 工具 13:照片通道进度 ----------------
+  ctx.tools.register(textTool({
+    name: "wordvault_photo_status",
+    description: "查看照片通道进度:photoDir 里共多少张照片、已扫描多少、哪些已入库、联络图在哪。",
+    parameters: {
+      folder: { type: "string", description: "照片目录,缺省用设置里的 photoDir" },
+      limit: { type: "number", description: "最多列几条,缺省 20" },
+    },
+    async execute(args) {
+      open();
+      const folder = String(args.folder || liveConfig.photo.dir);
+      const photos = existsSync(folder) ? findPhotos(folder, { recursive: liveConfig.photo.recursive }) : [];
+      const progress = loadProgress(photoProgressFile());
+      const ingested = ingestedPhotoHashes();
+      const n = Math.max(1, Math.min(200, Number(args.limit) || 20));
+      const rows = photos.slice(0, n).map((p) => {
+        let hash = "";
+        try {
+          hash = photoHash(p);
+        } catch {
+          /* 读不到就留空 */
+        }
+        const sc = hash ? progress[hash] : null;
+        return {
+          photo: basename(p),
+          hash,
+          scanned: !!sc,
+          regions: sc ? sc.regions : null,
+          sheet: sc && sc.sheets && sc.sheets[0] ? sc.sheets[0] : null,
+          ingested: !!(hash && ingested[hash]),
+          ingestedAt: hash && ingested[hash] ? ingested[hash].ingestedAt : null,
+        };
+      });
+      return json({
+        ok: true,
+        folder,
+        photoDir: liveConfig.photo.dir,
+        outDir: liveConfig.photo.outDir,
+        script: scannerScript(),
+        total: photos.length,
+        scanned: rows.filter((r) => r.scanned).length,
+        ingested: rows.filter((r) => r.ingested).length,
+        photos: rows,
+        note: photos.length ? undefined : `目录里还没有照片:${folder}`,
       });
     },
   }));

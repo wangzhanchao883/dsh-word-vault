@@ -19,6 +19,27 @@ export const DEFAULT_CONFIG = {
   outputDir: "D:\\workout\\AI助理\\英语趣味单词\\输出",
   /** 剪贴板截图落盘目录(拍照/截图通道用) */
   imageDir: "D:\\workout\\AI助理\\英语趣味单词\\截图",
+  /** 拍照识别(P4):照片目录、裁剪产物目录与判据参数 */
+  photo: {
+    /** 你往里丢照片的目录(可在设置页改);也可以直接在对话里发照片 */
+    dir: "D:\\workout\\AI助理\\英语趣味单词\\拍照",
+    /** 裁剪块与联络图落盘目录 */
+    outDir: "D:\\workout\\AI助理\\英语趣味单词\\拍照处理",
+    /** 是否递归子目录 */
+    recursive: true,
+    /** 已处理的照片是否保留逐块裁剪 PNG(联络图总是保留) */
+    keepCrops: true,
+    /** 掩码:算作"标记墨迹"的最低饱和度(荧光笔/红笔都是饱和色,铅笔手写不饱和) */
+    satMin: 40,
+    /** 裁剪时上方多留多少像素(红线/红圈在词的下方或四周,必须把词带进来) */
+    padUp: 30,
+    /** 单个裁剪块的最大高度 */
+    maxCropH: 160,
+    /** 裁剪块内印刷黑字至少要占多少比例的列(剔除空白边距与插图) */
+    minDarkSpread: 0.45,
+    /** 每次最多处理几张新照片(防止一次丢 50 张把时间拉满) */
+    maxPerRun: 8,
+  },
   /** 翻译/生成用的提供方与模型 */
   provider: "deepseek-official",
   model: "deepseek-v4-flash",
@@ -143,6 +164,7 @@ export function resolveConfig(input = {}) {
   const wordsSrc = src.words && typeof src.words === "object" ? src.words : {};
   const cardsSrc = src.cards && typeof src.cards === "object" ? src.cards : {};
   const examSrc = src.exam && typeof src.exam === "object" ? src.exam : {};
+  const photoSrc = src.photo && typeof src.photo === "object" ? src.photo : {};
 
   const users = Array.isArray(src.users)
     ? src.users.map(normalizeUser).filter(Boolean)
@@ -194,6 +216,17 @@ export function resolveConfig(input = {}) {
       recheckRatio: pickNumber(examSrc.recheckRatio, DEFAULT_CONFIG.exam.recheckRatio, 0, 1),
       minutes: pickNumber(examSrc.minutes, DEFAULT_CONFIG.exam.minutes, 1, 600),
       batchSize: pickNumber(examSrc.batchSize, DEFAULT_CONFIG.exam.batchSize, 1, 12),
+    },
+    photo: {
+      dir: pickString(photoSrc.dir, DEFAULT_CONFIG.photo.dir),
+      outDir: pickString(photoSrc.outDir, DEFAULT_CONFIG.photo.outDir),
+      recursive: photoSrc.recursive === undefined ? DEFAULT_CONFIG.photo.recursive : !!photoSrc.recursive,
+      keepCrops: photoSrc.keepCrops === undefined ? DEFAULT_CONFIG.photo.keepCrops : !!photoSrc.keepCrops,
+      satMin: pickNumber(photoSrc.satMin, DEFAULT_CONFIG.photo.satMin, 5, 200),
+      padUp: pickNumber(photoSrc.padUp, DEFAULT_CONFIG.photo.padUp, 0, 200),
+      maxCropH: pickNumber(photoSrc.maxCropH, DEFAULT_CONFIG.photo.maxCropH, 40, 600),
+      minDarkSpread: pickNumber(photoSrc.minDarkSpread, DEFAULT_CONFIG.photo.minDarkSpread, 0, 1),
+      maxPerRun: pickNumber(photoSrc.maxPerRun, DEFAULT_CONFIG.photo.maxPerRun, 1, 50),
     },
   };
 }

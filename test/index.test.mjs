@@ -67,7 +67,7 @@ test("插件契约:name/inject/apply 齐全", () => {
   assert.equal(typeof apply, "function");
 });
 
-test("注册 11 个工具 + 设置命名空间 + effect 生命周期", () => {
+test("注册 13 个工具 + 设置命名空间 + effect 生命周期", () => {
   const dir = tempDir();
   const rt = fakeRuntime();
   try {
@@ -82,7 +82,9 @@ test("注册 11 个工具 + 设置命名空间 + effect 生命周期", () => {
       "wordvault_export_cards",
       "wordvault_fix_last",
       "wordvault_make_cards",
+      "wordvault_photo_status",
       "wordvault_query",
+      "wordvault_scan_photo",
       "wordvault_status",
     ]);
     assert.equal(rt.settingsNamespaces.length, 1);
