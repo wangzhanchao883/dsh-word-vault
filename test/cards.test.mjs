@@ -27,6 +27,33 @@ function makeWords(n) {
   return out;
 }
 
+test("高频词角标:达到门槛才印,低频词不印", () => {
+  const hot = renderCard({ word: "kinds", segs: [{ en: "ki", cn: "开" }, { en: "nds", cn: "恩兹" }], story: "x", seenCount: 4 }, 1, { highFreqMin: 2 });
+  assert.match(hot, /class="freq"/);
+  assert.match(hot, /标记 4 次/);
+  const cold = renderCard({ word: "map", segs: [], story: "x", seenCount: 1 }, 2, { highFreqMin: 2 });
+  assert.ok(!cold.includes('class="freq"'), "只标记 1 次的词不该印角标");
+  const noCount = renderCard({ word: "map", segs: [], story: "x" }, 3, { highFreqMin: 2 });
+  assert.ok(!noCount.includes('class="freq"'), "拿不到次数时不印");
+  const strict = renderCard({ word: "kinds", segs: [], story: "x", seenCount: 4 }, 4, { highFreqMin: 5 });
+  assert.ok(!strict.includes('class="freq"'), "门槛设为 5 时 4 次不算高频");
+});
+
+test("buildCardHtml / Word 版把频次带进产物,并统计高频卡数", () => {
+  const words = [
+    { word: "kinds", phonetic: "/k/", pos: "n.", meaning: "种类", segs: [{ en: "ki", cn: "开" }], story: "s1", seenCount: 4 },
+    { word: "map", phonetic: "/m/", pos: "n.", meaning: "地图", segs: [{ en: "map", cn: "马铺" }], story: "s2", seenCount: 1 },
+  ];
+  const built = buildCardHtml({ title: "T", words, highFreqMin: 2 });
+  assert.equal(built.highFreqCards, 1);
+  assert.equal((built.html.match(/标记 4 次/g) || []).length, 1);
+  assert.ok(!built.html.includes("标记 1 次"));
+
+  const docx = buildDocxHtml({ title: "T", words, highFreqMin: 2 });
+  assert.match(docx.html, /［标记 4 次］/);
+  assert.ok(!docx.html.includes("［标记 1 次］"));
+});
+
 test("版式常量:每页 8 张(2 列 × 4 行)", () => {
   assert.equal(PER_PAGE, 8);
 });

@@ -60,6 +60,8 @@ export const DEFAULT_CONFIG = {
     /** 单次录入最多入库多少个词,防止误复制长文灌库 */
     maxWordsPerCapture: 30,
   },
+  /** 高频词门槛:累计被录入(被标记)达到这个次数就算高频,查询/出片据此标记与筛选 */
+  highFreqMin: 2,
   /** 常驻剪贴板助手 */
   helper: {
     enabled: true,
@@ -206,6 +208,7 @@ export function resolveConfig(input = {}) {
       watchImages: pickBool(helperSrc.watchImages, DEFAULT_CONFIG.helper.watchImages),
     },
     logTail: pickNumber(src.logTail, DEFAULT_CONFIG.logTail, 10, 5000),
+    highFreqMin: pickNumber(src.highFreqMin, DEFAULT_CONFIG.highFreqMin, 1, 100),
     cards: {
       title: pickString(cardsSrc.title, DEFAULT_CONFIG.cards.title),
       subtitle: typeof cardsSrc.subtitle === "string" ? cardsSrc.subtitle.trim() : DEFAULT_CONFIG.cards.subtitle,

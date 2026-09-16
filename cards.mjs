@@ -140,6 +140,13 @@ body {
   display: flex; align-items: center; gap: 1.6mm;
   font-size: 7pt; color: #8798a8; letter-spacing: .4pt;
 }
+/* 高频角标:只在累计被标记次数 >= 门槛时出现(红色,与"荒诞句"同色系,一眼能挑出重点词) */
+.freq {
+  position: absolute; right: 2.4mm; top: 2mm; z-index: 2;
+  font-size: 6.6pt; font-weight: 700; color: #c0392b;
+  background: #fdf1ee; border: .8pt solid #e8b7a8; border-radius: 1.4mm;
+  padding: .25mm 1.1mm;
+}
 .box {
   display: inline-block; width: 2.8mm; height: 2.8mm;
   border: 1pt solid #8798a8; border-radius: .6mm;
@@ -166,8 +173,18 @@ export function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * 高频词角标:累计被标记次数达到门槛的才印("高频的更应该标记出来")。
+ * 次数 < 门槛(或拿不到次数)时不印,避免卡面被噪声填满。
+ */
+function freqBadge(w, highFreqMin) {
+  const n = Number(w && w.seenCount);
+  if (!Number.isFinite(n) || n < (Number(highFreqMin) || 2)) return "";
+  return `<span class="freq">标记 ${n} 次</span>`;
+}
+
 /** 一张卡（四层结构） */
-export function renderCard(w, idx) {
+export function renderCard(w, idx, opts = {}) {
   const segs = (Array.isArray(w.segs) ? w.segs : [])
     .map((s) => `<div class="seg"><span class="en">${escapeHtml(s.en)}</span><span class="cn">${escapeHtml(s.cn)}</span></div>`)
     .join("");
@@ -176,6 +193,7 @@ export function renderCard(w, idx) {
   const wcls = wd.length >= 11 ? "word long" : "word";
   return (
     '<div class="card">' +
+    freqBadge(w, opts.highFreqMin) +
     '<div class="chead">' +
     `<div class="idx">${String(idx).padStart(2, "0")}</div>` +
     '<div class="wtxt">' +
@@ -205,15 +223,16 @@ export function renderPage(cardsHtml, pageNo, total, title, subtitle) {
 
 /**
  * 拼出整份 A4 卡片 HTML。
- * @returns {{html:string, pages:number, cards:number, perPage:number}}
+ * @param {{title?:string, subtitle?:string, words?:Array, highFreqMin?:number}} args
+ * @returns {{html:string, pages:number, cards:number, perPage:number, highFreqCards:number}}
  */
-export function buildCardHtml({ title = "趣味单词记忆卡", subtitle = "", words = [] }) {
+export function buildCardHtml({ title = "趣味单词记忆卡", subtitle = "", words = [], highFreqMin = 2 }) {
   const list = Array.isArray(words) ? words : [];
   const chunks = [];
   for (let i = 0; i < list.length; i += PER_PAGE) chunks.push(list.slice(i, i + PER_PAGE));
 
   const body = chunks.map((chunk, pi) => {
-    const cards = chunk.map((w, i) => renderCard(w, pi * PER_PAGE + i + 1));
+    const cards = chunk.map((w, i) => renderCard(w, pi * PER_PAGE + i + 1, { highFreqMin }));
     while (cards.length < PER_PAGE) {
       cards.push('<div class="card blank"><div class="blanklab">空位 · 错词重写区</div></div>');
     }
@@ -221,25 +240,32 @@ export function buildCardHtml({ title = "趣味单词记忆卡", subtitle = "", 
   });
 
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>${CARD_CSS}</style></head><body>${body.join("")}</body></html>`;
-  return { html, pages: chunks.length, cards: list.length, perPage: PER_PAGE };
+  return {
+    html,
+    pages: chunks.length,
+    cards: list.length,
+    perPage: PER_PAGE,
+    highFreqCards: list.filter((w) => Number(w && w.seenCount) >= Number(highFreqMin || 2)).length,
+  };
 }
 
 /**
  * Word 版：改用表格排版（Word 对 flex/grid 支持差），每张卡一个表格块，打印友好。
  * 与 PDF 版共用同一份内容，只是容器换成 table。
  */
-export function buildDocxHtml({ title = "趣味单词记忆卡", subtitle = "", words = [] }) {
+export function buildDocxHtml({ title = "趣味单词记忆卡", subtitle = "", words = [], highFreqMin = 2 }) {
   const list = Array.isArray(words) ? words : [];
   const blocks = list.map((w, i) => {
     const segs = Array.isArray(w.segs) ? w.segs : [];
     const segRow = segs
       .map((s) => `<td style="border:1px solid #b9cbdd;background:#eef4fb;text-align:center;padding:4px 6px;width:${Math.floor(100 / Math.max(1, segs.length))}%"><b style="color:#1f5a94">${escapeHtml(s.en)}</b><br><b style="color:#c0392b">${escapeHtml(s.cn)}</b></td>`)
       .join("");
+    const freq = Number(w && w.seenCount) >= Number(highFreqMin || 2) ? ` <b style="color:#c0392b;font-size:9pt;">［标记 ${Number(w.seenCount)} 次］</b>` : "";
     return `
 <table style="width:100%;border-collapse:collapse;border:1.5px solid #1b2a3a;margin:0 0 10px 0;">
   <tr><td style="padding:6px 8px 2px 8px;">
     <b style="font-size:16pt;">${String(i + 1).padStart(2, "0")}.</b>
-    <b style="font-size:16pt;"> ${escapeHtml(w.word)}</b>
+    <b style="font-size:16pt;"> ${escapeHtml(w.word)}</b>${freq}
     <span style="font-size:9pt;color:#5c6f82;"> ${escapeHtml(w.phonetic || "")} · ${escapeHtml(w.pos || "")} ${escapeHtml(w.meaning || "")}</span>
   </td></tr>
   <tr><td style="padding:2px 8px;"><table style="width:100%;border-collapse:collapse;"><tr>${segRow}</tr></table></td></tr>
@@ -371,9 +397,9 @@ export async function htmlToDocx(htmlPath, docxPath) {
  * 一次出全套：HTML(卡片版) + PDF + Word + 首页预览 PNG。
  * @param {{outDir:string, stem:string, title:string, subtitle:string, words:Array, formats?:string[]}} args
  */
-export async function exportCardSet({ outDir, stem, title, subtitle, words, formats = ["html", "pdf", "word"] }) {
+export async function exportCardSet({ outDir, stem, title, subtitle, words, formats = ["html", "pdf", "word"], highFreqMin = 2 }) {
   mkdirSync(outDir, { recursive: true });
-  const built = buildCardHtml({ title, subtitle, words });
+  const built = buildCardHtml({ title, subtitle, words, highFreqMin });
   const htmlPath = join(outDir, `${stem}.html`);
   writeFileSync(htmlPath, built.html, "utf8");
 
@@ -381,7 +407,7 @@ export async function exportCardSet({ outDir, stem, title, subtitle, words, form
   if (formats.includes("pdf")) out.pdf = await htmlToPdf(htmlPath, join(outDir, `${stem}_记忆卡.pdf`));
   if (formats.includes("word")) {
     const docxHtmlPath = join(outDir, `${stem}_word.html`);
-    writeFileSync(docxHtmlPath, buildDocxHtml({ title, subtitle, words }).html, "utf8");
+    writeFileSync(docxHtmlPath, buildDocxHtml({ title, subtitle, words, highFreqMin }).html, "utf8");
     out.word = await htmlToDocx(docxHtmlPath, join(outDir, `${stem}_记忆卡.docx`));
   }
   if (formats.includes("png") || out.pdf?.ok) {

@@ -98,50 +98,88 @@ export async function collectText(llm, options, signal) {
 
 /**
  * 批量翻译。
- * @param {{llm:any, provider:string, model:string, words:Array<{term:string}>, signal?:AbortSignal, logger?:any}} args
+ *
+ * 实测教训(2026-09-16):之前是"整批一次调用,失败就整批丢"——照片整批录入时出现过
+ * 两批共 51 个词全部没释义(调用异常被静默吞掉),卡都出不了。所以现在:
+ *   ① 分批(默认 12 个/次),一批失败不牵连其它批;
+ *   ② 未返回的词**再重试一轮**(窄批次,成功率高);
+ *   ③ 返回值里带上 missing,调用方能看到"还没翻译成功的词"。
+ *
+ * @param {{llm:any, provider:string, model:string, words:Array<{term:string}>, signal?:AbortSignal,
+ *          logger?:any, batchSize?:number}} args
  * @returns {Promise<Map<string,{phonetic:string,pos:string,meaning:string}>>}
  */
-export async function translateWords({ llm, provider, model, words, signal, logger }) {
+export async function translateWords({ llm, provider, model, words, signal, logger, batchSize = 12 }) {
   const result = new Map();
-  const list = (Array.isArray(words) ? words : [])
-    .map((w) => String(w && w.term ? w.term : w).trim().toLowerCase())
-    .filter(Boolean);
+  const list = [
+    ...new Set(
+      (Array.isArray(words) ? words : [])
+        .map((w) => String(w && w.term ? w.term : w).trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
   if (!list.length) return result;
   if (!llm || typeof llm.stream !== "function") {
     if (logger) logger.warn("dsh-word-vault: ctx.llm 不可用,跳过翻译(只记词形)");
     return result;
   }
 
-  const prompt = buildTranslatePrompt(list);
-  const message = await createUserMsg(prompt);
+  const size = Math.max(1, Math.min(30, Number(batchSize) || 12));
+  const chunk = (arr) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  };
 
-  let raw = "";
-  try {
-    raw = await collectText(
+  const ask = async (terms) => {
+    const raw = await collectText(
       llm,
       {
         provider,
         model,
-        messages: [message],
-        maxTokens: Math.min(4000, 120 * list.length + 200),
-        purpose: undefined,
+        messages: [await createUserMsg(buildTranslatePrompt(terms))],
+        maxTokens: Math.min(4000, 140 * terms.length + 300),
       },
       signal,
     );
-  } catch (err) {
-    if (logger) logger.warn(`dsh-word-vault: 翻译调用失败 - ${err && err.message ? err.message : err}`);
-    return result;
+    for (const item of parseTranslateOutput(raw)) {
+      const term = String(item && item.term ? item.term : "").trim().toLowerCase();
+      if (!term) continue;
+      result.set(term, {
+        phonetic: String(item.phonetic || ""),
+        pos: String(item.pos || ""),
+        meaning: String(item.meaning || ""),
+      });
+    }
+  };
+
+  for (const part of chunk(list)) {
+    try {
+      await ask(part);
+    } catch (err) {
+      if (logger) logger.warn(`dsh-word-vault: 翻译调用失败(${part.length} 词) - ${err && err.message ? err.message : err}`);
+    }
   }
 
-  for (const item of parseTranslateOutput(raw)) {
-    const term = String(item && item.term ? item.term : "").trim().toLowerCase();
-    if (!term) continue;
-    result.set(term, {
-      phonetic: String(item.phonetic || ""),
-      pos: String(item.pos || ""),
-      meaning: String(item.meaning || ""),
-    });
+  // 未返回的词重试一轮:一次调用失败/被截断不该让整批词丢掉释义
+  const missing = list.filter((t) => !result.has(t));
+  if (missing.length) {
+    if (logger) logger.info(`dsh-word-vault: 翻译重试 ${missing.length} 个未返回的词`);
+    for (const part of chunk(missing)) {
+      try {
+        await ask(part);
+      } catch (err) {
+        if (logger) logger.warn(`dsh-word-vault: 翻译重试失败(${part.length} 词) - ${err && err.message ? err.message : err}`);
+      }
+    }
   }
-  if (logger) logger.info(`dsh-word-vault: 翻译 ${result.size}/${list.length} 条`);
+
+  const stillMissing = list.filter((t) => !result.has(t));
+  if (logger) {
+    logger.info(
+      `dsh-word-vault: 翻译 ${result.size}/${list.length} 条` +
+        (stillMissing.length ? `,未成功 ${stillMissing.length} 个:${stillMissing.slice(0, 8).join(",")}${stillMissing.length > 8 ? "…" : ""}` : ""),
+    );
+  }
   return result;
 }

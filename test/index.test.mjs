@@ -293,6 +293,58 @@ test("P2 工具链路:无卡片时 export 自动补生成;生成失败给出可�
   }
 });
 
+// ---------------------------------------------------------------- 高频词
+
+test("高频词:可累计(同批去重、跨批+1)+ 查询支持 highFreq 过滤与标记", async () => {
+  const dir = tempDir();
+  const rt = fakeRuntime();
+  try {
+    apply(rt.ctx, {
+      dbPath: join(dir, "words.db"),
+      helper: { enabled: false },
+      autoTranslate: false,
+      highFreqMin: 2,
+      // 关掉词组条目:2~5 词短句默认会另存一条 phrase,这里只想验证词的计次
+      words: { keepPhrases: false },
+      users: [{ name: "用户1" }],
+    });
+    const exec = {};
+    const add = (text) => rt.tools.get("wordvault_add").execute({ text, user: "用户1" }, exec);
+
+    // 同一批里重复出现 -> 只算一次
+    const first = JSON.parse(await add("kinds kinds plants"));
+    assert.equal(first.added, 2, JSON.stringify(first));
+    // 跨批再录 -> 次数 +1
+    const second = JSON.parse(await add("kinds"));
+    assert.equal(second.added, 0);
+    assert.equal(second.repeated, 1);
+    await add("plants kinds");
+    // 只录过一次的词,作为低频对照
+    await add("river");
+
+    const q = JSON.parse(await rt.tools.get("wordvault_query").execute({ user: "用户1", highFreq: true, orderBy: "count" }, exec));
+    assert.equal(q.highFreqMin, 2);
+    assert.deepEqual(q.words.map((w) => w.word).sort(), ["kind", "plant"]);
+    assert.ok(q.words.every((w) => w.highFreq === true));
+    assert.ok(q.words.every((w) => w.seenCount >= 2), JSON.stringify(q.words));
+    assert.equal(q.words.find((w) => w.word === "kind").seenCount, 3);
+
+    const all = JSON.parse(await rt.tools.get("wordvault_query").execute({ user: "用户1", limit: 50 }, exec));
+    assert.ok(all.words.length >= 3);
+    const river = all.words.find((w) => w.word === "river");
+    assert.ok(river, "对照词应在结果里");
+    assert.equal(river.seenCount, 1);
+    assert.equal(river.highFreq, false, "只录一次的词不该标成高频");
+
+    const st = JSON.parse(await rt.tools.get("wordvault_status").execute({ user: "用户1" }, exec));
+    assert.equal(st.highFreqMin, 2);
+    assert.ok(st.highFreq.length >= 2);
+    assert.equal(st.highFreq[0].word, "kind");
+  } finally {
+    cleanup(dir, rt.effects);
+  }
+});
+
 // ---------------------------------------------------------------- P3 考试工具链路
 
 /** 假 LLM:翻译请求返回释义;出题请求返回"含该词的句子 + 三个干扰项" */

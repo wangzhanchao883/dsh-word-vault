@@ -92,6 +92,7 @@ const settingsSchema = z.object({
   keepPhrases: z.boolean().default(DEFAULT_CONFIG.words.keepPhrases),
   maxWordsPerCapture: z.number().min(1).max(500).default(DEFAULT_CONFIG.words.maxWordsPerCapture),
   extraStopwords: z.array(z.string()).default([]),
+  highFreqMin: z.number().min(1).max(100).default(DEFAULT_CONFIG.highFreqMin),
   cardsTitle: z.string().default(DEFAULT_CONFIG.cards.title),
   cardsSubtitle: z.string().default(DEFAULT_CONFIG.cards.subtitle),
   cardsBatchSize: z.number().min(1).max(20).default(DEFAULT_CONFIG.cards.batchSize),
@@ -138,6 +139,7 @@ function toFlat(config) {
     keepPhrases: config.words.keepPhrases,
     maxWordsPerCapture: config.words.maxWordsPerCapture,
     extraStopwords: config.words.extraStopwords ?? [],
+    highFreqMin: config.highFreqMin,
     cardsTitle: config.cards.title,
     cardsSubtitle: config.cards.subtitle,
     cardsBatchSize: config.cards.batchSize,
@@ -189,6 +191,7 @@ function fromFlat(flat) {
       maxWordsPerCapture: flat.maxWordsPerCapture,
       extraStopwords: flat.extraStopwords,
     },
+    highFreqMin: flat.highFreqMin,
     cards: {
       title: flat.cardsTitle,
       subtitle: flat.cardsSubtitle,
@@ -361,13 +364,14 @@ export function apply(ctx, input = {}) {
   ctx.tools.register(textTool({
     name: "wordvault_query",
     description:
-      "按维度查询生词库:录入时间区间(since/until)、出现次数区间(minCount/maxCount)、已学会状态(status)、排序方式(orderBy: recent/count/oldest/alpha/stale)。返回词条、音标、释义、次数与时间。",
+      "按维度查询生词库:录入时间区间(since/until)、出现次数区间(minCount/maxCount)、已学会状态(status)、排序方式(orderBy: recent/count/oldest/alpha/stale)。highFreq=true 只看高频词(累计被录入次数 ≥ highFreqMin)。返回词条、音标、释义、次数、时间与 highFreq 标记。",
     parameters: {
       user: { type: "string", description: "用户库,缺省默认用户" },
       since: { type: "string", description: "起始时间(含),ISO 或 YYYY-MM-DD" },
       until: { type: "string", description: "结束时间(含),ISO 或 YYYY-MM-DD" },
       minCount: { type: "number", description: "最少出现过几次" },
       maxCount: { type: "number", description: "最多出现过几次" },
+      highFreq: { type: "boolean", description: "只看高频词(次数 ≥ highFreqMin,默认 2)" },
       status: { type: "string", enum: ["learning", "half", "mastered"], description: "掌握状态" },
       orderBy: { type: "string", enum: ["recent", "count", "oldest", "alpha", "stale"], description: "排序,缺省 recent" },
       limit: { type: "number", description: "返回条数,缺省 30" },
@@ -380,7 +384,8 @@ export function apply(ctx, input = {}) {
         userId: user.id,
         since: args.since,
         until: args.until,
-        minCount: args.minCount,
+        // highFreq 只是 minCount 的语义化开关:门槛来自设置里的 highFreqMin
+        minCount: args.highFreq ? Math.max(Number(args.minCount) || 0, liveConfig.highFreqMin) : args.minCount,
         maxCount: args.maxCount,
         status: args.status,
         orderBy: args.orderBy || "recent",
@@ -389,6 +394,7 @@ export function apply(ctx, input = {}) {
       return json({
         user: user.name,
         count: rows.length,
+        highFreqMin: liveConfig.highFreqMin,
         words: rows.map((r) => ({
           word: r.lemma,          // 词元(词典形),展示与背诵以它为准
           term: r.term,           // 最近一次录入时的原文形态
@@ -397,6 +403,7 @@ export function apply(ctx, input = {}) {
           pos: r.pos || "",
           meaning: r.meaning || "",
           seenCount: r.seen_count,
+          highFreq: r.seen_count >= liveConfig.highFreqMin,
           status: r.status,
           streak: r.streak,
           firstSeenAt: r.first_seen_at,
@@ -427,6 +434,14 @@ export function apply(ctx, input = {}) {
         users: allUsers,
         stats: user ? stats(db, user.id) : null,
         cards: user ? cardStats(db, user.id) : null,
+        highFreqMin: liveConfig.highFreqMin,
+        highFreq: user
+          ? queryWords(db, { userId: user.id, kind: "word", minCount: liveConfig.highFreqMin, orderBy: "count", limit: 20 }).map((r) => ({
+              word: r.lemma,
+              seenCount: r.seen_count,
+              status: r.status,
+            }))
+          : [],
         recentCaptures: listCaptures(db, user ? user.id : null, 5).map((c) => ({
           id: c.id,
           user: c.user_id,
@@ -653,6 +668,7 @@ export function apply(ctx, input = {}) {
           meaning: r.card_meaning || r.meaning || "",
           segs,
           story: r.card_story || "",
+          seenCount: r.seen_count, // 高频词在卡面上印"标记 N 次"
         };
       });
 
@@ -674,12 +690,14 @@ export function apply(ctx, input = {}) {
         subtitle,
         words,
         formats,
+        highFreqMin: liveConfig.highFreqMin,
       });
 
       return json({
         ok: true,
         user: picked.user.name,
         cards: words.length,
+        highFreqCards: words.filter((w) => Number(w.seenCount) >= liveConfig.highFreqMin).length,
         pages: out.pages,
         perPage: 8,
         generatedNow: generated,

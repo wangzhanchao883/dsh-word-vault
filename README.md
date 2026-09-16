@@ -253,6 +253,7 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 ```
 
 - **计次口径**：同一批内按 `lemma` 去重（同一次录入里重复出现只算一次）；跨批次每录一次 `seen_count + 1`；`term` 保留最近一次原文形态，展示以 `lemma` 为准。
+- **高频**：`seen_count >= highFreqMin`（默认 2）即视为高频。`wordvault_query({ highFreq: true })` 只取高频词；`wordvault_status` 给出高频榜；记忆卡/Word 版在卡面右上角印「标记 N 次」红色角标（低频词不印，避免噪音）。考试想专挑「高频且不会」，用 `minCount` + `status: 'learning'` + `orderBy: 'count'` 组合即可。
 - **今日累计**：`todayCount()` 取 `substr(created_at,1,10)` 与本地日期比较（不用 SQLite `date()`,它会按 UTC 归一,跨零点算错一天）。
 - **撤销**：删掉该次 `capture_id` 的 events，受影响词条按剩余 events 重算；不再有任何 event 的词条整条删除（即"这次新建的"）。
 - **可重建性**：`words` 是 `events` 的投影，`rebuildCounters()` 可全量重算。
@@ -281,6 +282,7 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 | `keepPhrases` | true | 2~5 词短文本另存一条「词组」 |
 | `maxWordsPerCapture` | 30 | 单次录入最多收多少词 |
 | `extraStopwords` | [] | 追加停用词 |
+| **`highFreqMin`** | **2** | 高频词门槛：累计被标记（录入）达到这个次数就算高频，查询/出片据此标记与筛选 |
 | `cardsTitle` / `cardsSubtitle` | 趣味单词记忆卡 / （空=自动） | 记忆卡页眉文案 |
 | `cardsBatchSize` | 8 | 记忆卡内容每次交给模型几个词 |
 | **`examCount`** | **10** | 默认出多少题 |
@@ -315,12 +317,13 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
-node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs
-# 94 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs
+# 103 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
-#        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)
+#        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)、
+#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
@@ -334,7 +337,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 
 助手端到端测试**不需要人工操作**：它用 `EnumChildWindows` 找到弹窗里的按钮句柄，`SendMessage(BM_CLICK)` 真点一下，再断言命令文件；视觉测试用 `CopyFromScreen` 截图后逐像素比对颜色。
 
-## 11. 实测踩坑（都已在代码/测试里处理，改代码前务必看）
+## 11. 实测踩坑
+
+> **翻译整批失败会让词「只剩词形」（2026-09-16 实测）**：照片整批录入时有两批共 51 个词全部没有释义（`ctx.llm` 调用异常被静默吞掉），连带卡都出不了。修法：`translateWords` **分批（默认 12/次）+ 未返回的词重试一轮 + 日志报出未成功的词**；事后用补翻译脚本一次性把 46 个词补齐（词典 45 → 91）。
+（都已在代码/测试里处理，改代码前务必看）
 
 **PowerShell / 助手侧**
 1. PS 5.1 把无 BOM 的 UTF-8 `.ps1` 当 ANSI/GBK 读 → 中文字面量被撕碎、语法报错。因此 `capture.ps1` **全 ASCII 源码**，中文文案从 UTF-8 JSON 配置注入。
