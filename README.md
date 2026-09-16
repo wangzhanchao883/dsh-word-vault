@@ -181,3 +181,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 - **P3** 考试闭环：英译汉单选（干扰项优先取同库词义）→ 在线答题 → 判分回写 → 连续 3 次答对打「已学会」、答错清零、已学会词 10% 抽样复查
 - **P4** 拍照通道：颜色掩码定位标记（荧光笔色块 + 红色下划线）→ 连通域聚类 → 裁剪 → 视觉模型只读印刷体 → 批量入库；判不清一律丢弃
 - **P5** 词库管理界面（浏览 / 改释义 / 删词 / 手动改标签）+ 统计（高频榜 / 最近新增 / 久未复习）
+
+## 10. 版本与回滚
+
+本仓库（https://github.com/wangzhanchao883/dsh-word-vault）是插件的独立源码仓库，存在的意义就是**改炸了能回到已知可用状态**。
+
+- **已打标签**：`v0.1.0-p1` = P1 交付时点（38 项 node 测试 + 17 项助手交互断言 + 14 项视觉/拖动断言全绿）
+- **整仓回滚到该标签**（会丢弃未提交改动，先确认或先 stash）：
+  ```powershell
+  cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
+  git stash push -m "wip before rollback"     # 或先自己 commit
+  git fetch --tags
+  git reset --hard v0.1.0-p1
+  ```
+- **只回滚某个文件**：`git checkout v0.1.0-p1 -- scripts/capture.ps1`
+- **看"炸了之后到底改了什么"**：`git diff v0.1.0-p1 --stat`，再 `git diff v0.1.0-p1 -- <文件>`
+- **回滚不会碰你的单词库**：数据库与运行时文件都在 `D:\workout\AI助理\英语趣味单词\单词库\`，不在本仓库内 —— 回滚代码永远不会影响已录入的词。
+- **建议节奏**：每完成一个可交付阶段（P2/P3/P4/P5）打一个标签，命名沿用 `v0.x.0-pN`。
+
+> 回滚后要生效记得**重启 DSH**（宿主侧代码在启动时加载）。
