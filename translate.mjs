@@ -82,8 +82,8 @@ export function parseTranslateOutput(text) {
   return [];
 }
 
-/** 流式取回完整文本 */
-async function collectText(llm, options, signal) {
+/** 流式取回完整文本(记忆卡生成模块也复用它) */
+export async function collectText(llm, options, signal) {
   let out = "";
   for await (const chunk of llm.stream({ ...options, signal })) {
     if (!chunk || typeof chunk !== "object") continue;

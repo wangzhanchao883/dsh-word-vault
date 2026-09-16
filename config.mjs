@@ -66,6 +66,15 @@ export const DEFAULT_CONFIG = {
   },
   /** 每批入库后保留的日志条数上限(供 wordvault_status 回看) */
   logTail: 200,
+  /** 记忆卡输出 */
+  cards: {
+    /** 卡片页眉主标题 */
+    title: "趣味单词记忆卡",
+    /** 页眉副标题(留空则自动写"用户 · N 词 · 拆词荒诞梗") */
+    subtitle: "",
+    /** 每次让模型处理多少个词(太大质量下降、太小费 token) */
+    batchSize: 8,
+  },
 };
 
 /** 助手浮窗与状态文案(中文放配置里,ps1 保持纯 ASCII 源码) */
@@ -121,6 +130,7 @@ export function resolveConfig(input = {}) {
   const src = input && typeof input === "object" ? input : {};
   const helperSrc = src.helper && typeof src.helper === "object" ? src.helper : {};
   const wordsSrc = src.words && typeof src.words === "object" ? src.words : {};
+  const cardsSrc = src.cards && typeof src.cards === "object" ? src.cards : {};
 
   const users = Array.isArray(src.users)
     ? src.users.map(normalizeUser).filter(Boolean)
@@ -162,6 +172,11 @@ export function resolveConfig(input = {}) {
       watchImages: pickBool(helperSrc.watchImages, DEFAULT_CONFIG.helper.watchImages),
     },
     logTail: pickNumber(src.logTail, DEFAULT_CONFIG.logTail, 10, 5000),
+    cards: {
+      title: pickString(cardsSrc.title, DEFAULT_CONFIG.cards.title),
+      subtitle: typeof cardsSrc.subtitle === "string" ? cardsSrc.subtitle.trim() : DEFAULT_CONFIG.cards.subtitle,
+      batchSize: pickNumber(cardsSrc.batchSize, DEFAULT_CONFIG.cards.batchSize, 1, 20),
+    },
   };
 }
 

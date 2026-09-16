@@ -15,8 +15,9 @@ capture-debug.log
 chip-pos.json
 word-vault-runtime/
 
-# local scratch / diagnostics
+# local scratch / diagnostics (every scratch file starts with an underscore)
 *.log
 _t*.txt
 _*.txt
+_*
 _tmp/

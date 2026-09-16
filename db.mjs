@@ -15,7 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -83,6 +83,25 @@ CREATE TABLE IF NOT EXISTS captures (
   updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_captures_created ON captures(created_at);
+-- 记忆卡内容(拆词 + 荒诞梗)。落库的意义:出片可复现、可只重生成某几个词、不重复烧 token。
+-- segs 存 JSON 数组 [{en,cn}];卡片主词用词元 lemma,与 words.lemma 对齐。
+CREATE TABLE IF NOT EXISTS cards (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id),
+  word_id    INTEGER NOT NULL REFERENCES words(id),
+  term       TEXT NOT NULL,
+  phonetic   TEXT NOT NULL DEFAULT '',
+  pos        TEXT NOT NULL DEFAULT '',
+  meaning    TEXT NOT NULL DEFAULT '',
+  segs       TEXT NOT NULL DEFAULT '[]',
+  story      TEXT NOT NULL DEFAULT '',
+  model      TEXT NOT NULL DEFAULT '',
+  source     TEXT NOT NULL DEFAULT 'llm',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (user_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
 CREATE TABLE IF NOT EXISTS exam_sessions (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id     INTEGER NOT NULL REFERENCES users(id),
@@ -384,13 +403,65 @@ export function queryWords(db, filter = {}) {
 
   return db
     .prepare(
-      `SELECT w.*, d.phonetic, d.pos, d.meaning
-       FROM words w LEFT JOIN dict d ON d.term = w.lemma
+      `SELECT w.*, d.phonetic, d.pos, d.meaning,
+              c.id AS card_id, c.term AS card_term, c.phonetic AS card_phonetic,
+              c.pos AS card_pos, c.meaning AS card_meaning, c.segs AS card_segs,
+              c.story AS card_story, c.model AS card_model, c.source AS card_source,
+              c.updated_at AS card_updated_at
+       FROM words w
+       LEFT JOIN dict d ON d.term = w.lemma
+       LEFT JOIN cards c ON c.word_id = w.id AND c.user_id = w.user_id
        WHERE ${where.join(" AND ")}
        ORDER BY ${order}
        LIMIT ?`,
     )
     .all(...params, limit);
+}
+
+/**
+ * 写/更新一张记忆卡。同一 (user, word) 只有一张,重复生成即覆盖(便于"只重做某几个词")。
+ * @returns {{ok:boolean, created:boolean, wordId:number}}
+ */
+export function upsertCard(db, { userId, wordId, term, phonetic = "", pos = "", meaning = "", segs = [], story = "", model = "", source = "llm" }) {
+  const at = nowIso();
+  const segsJson = JSON.stringify(Array.isArray(segs) ? segs : []);
+  const existing = db.prepare("SELECT id FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId);
+  if (existing) {
+    db.prepare(
+      `UPDATE cards SET term = ?, phonetic = ?, pos = ?, meaning = ?, segs = ?, story = ?, model = ?, source = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(term, phonetic, pos, meaning, segsJson, story, model, source, at, existing.id);
+    return { ok: true, created: false, wordId };
+  }
+  db.prepare(
+    `INSERT INTO cards(user_id, word_id, term, phonetic, pos, meaning, segs, story, model, source, created_at, updated_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(userId, wordId, term, phonetic, pos, meaning, segsJson, story, model, source, at, at);
+  return { ok: true, created: true, wordId };
+}
+
+export function getCard(db, userId, wordId) {
+  return db.prepare("SELECT * FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId) ?? null;
+}
+
+export function deleteCard(db, userId, wordId) {
+  const n = db.prepare("DELETE FROM cards WHERE user_id = ? AND word_id = ?").run(userId, wordId);
+  return { ok: Number(n.changes) > 0 };
+}
+
+/** 记忆卡进度:某用户有卡/无卡的词数 */
+export function cardStats(db, userId) {
+  const total = db.prepare("SELECT COUNT(*) AS n FROM words WHERE user_id = ?").get(userId).n;
+  const withCard = db
+    .prepare("SELECT COUNT(*) AS n FROM cards c JOIN words w ON w.id = c.word_id WHERE c.user_id = ? AND w.kind = 'word'")
+    .get(userId).n;
+  const stale = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM cards c JOIN words w ON w.id = c.word_id
+       WHERE c.user_id = ? AND c.updated_at < w.last_seen_at`,
+    )
+    .get(userId).n;
+  return { total, withCard, withoutCard: Math.max(0, total - withCard), stale };
 }
 
 /**

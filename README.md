@@ -1,6 +1,6 @@
 # dsh-word-vault · 英语生词库
 
-多用户英语生词库 DSH 插件：**复制 → 鼠标处弹窗点选 → 入库并反馈**，LLM 自动翻译，SQLite 计次，按时间 / 频次 / 掌握度查询，后续围绕它做打印卡片与考试闭环。
+多用户英语生词库 DSH 插件：**复制 → 鼠标处弹窗点选 → 入库并反馈**，LLM 自动翻译，SQLite 计次，按时间 / 频次 / 掌握度查询，并输出**可打印的趣味单词记忆卡**（HTML / PDF / Word），后续接考试闭环。
 
 ---
 
@@ -75,7 +75,50 @@ Ctrl+C 复制英文
 | `wordvault_capture_clipboard` | 请求助手立刻抓一次剪贴板 |
 | `wordvault_fix_last` | 撤销最近一次录入 / 改到另一个用户库 |
 
-## 4. 数据模型（node:sqlite）
+## 4. 记忆卡输出（P2）
+
+把选定范围的生词导成**可打印的趣味单词记忆卡**：拆词 + 一句荒诞梗钉住拼写。版式与「拆解三法 / 梗四判据」全部照搬 workbuddy 专家包 `funny-word-cards`（本插件自包含，不依赖那个专家目录）。
+
+### 流程
+
+```
+选范围(时间/频次/掌握度/指定词) → 缺卡片的用 LLM 生成拆词+梗 → 落 cards 表 → 出片
+   ├─ HTML  卡片版(A4 分页,可直接浏览器打印)
+   ├─ PDF   Edge headless 打印成 A4 PDF
+   ├─ Word  pandoc 转 .docx(表格版,便于再编辑)
+   └─ PNG   首页预览图(排版自检用:确认第 4 行勾选框没被切掉)
+```
+
+工具：`wordvault_make_cards`（只生成内容）、`wordvault_export_cards`（出片，缺卡的默认先自动生成）。
+
+### 卡片规格（与专家包一致）
+
+- A4 竖版，**每页 8 张（2 列 × 4 行）**，单面打印
+- 每张卡四层：**词头**（序号圆标 + 大字单词 + 音标/词性/释义）→ **拆解块**（字母片段 ↔ 中文音，上下对齐）→ **荒诞句**（橙色左边框一句话）→ **默写区 + 「已攻下」勾选框**
+- 单词 ≥11 字母自动缩小字号；不足 8 张时空位印成虚线框「空位 · 错词重写区」，不留白纸
+- ⚠️ **每页张数与 CSS 是联动的**（8 张/页时每卡约 65mm 高，字号间距是一整套），所以 `PER_PAGE` 固定在代码里不开放配置；要改必须同步改 `cards.mjs` 的 `CARD_CSS`
+
+### 内容质量闸门（代码侧硬校验，不信模型自述）
+
+| 级别 | 判定 | 处理 |
+|---|---|---|
+| 硬失败 | 拆解块顺序拼接 ≠ 原词 / 缺拆解 / 缺梗句 | 带着具体原因**重试一次**；仍不合格才记为失败 |
+| 质量告警 | 逐字母硬拆（单字母块占比 ≥50% 且 ≥3 块）、拆解块 >4、中文音 >2 字 | 同样重试一次；仍不合格**保留卡片但标 `low`**，并在返回值里列进 `lowQuality` |
+| 自动修正 | 音标不合 `/.../` 格式 → 清空（宁缺勿造）；梗句 >60 字 → 截断 | 直接改 |
+
+**实测教训**：第一版提示词只说"短词不要硬凑谐音"，模型给出 `map → m摸/a啊/p铺`、`health → h喝/e鹅/a啊/l乐/t踢/h好`（逐字母硬拆，正是专家包警告的污染发音失败模式）。改成**按读音音节切块 + 明确给出正例/反例**后，同样 13 个词变成 `to特/ma马/to头`、`heal嘿欧/th思`、`pho佛/to头`，质量待改从 8 个降到 **0**。
+
+### 重做与润色（双路）
+
+- 插件侧：`wordvault_make_cards({ words: "tomato,health", regenerate: true })` 只重做指定的词（已落库卡片会被覆盖）
+- 对话侧：直接让我按专家包方法论重写某几个词的拆解/梗，再调 `wordvault_export_cards` 出片
+- 卡片内容落 `cards` 表，所以**出片可复现、重出不再烧 token**（除非显式 regenerate）
+
+### 落库
+
+`cards(user_id, word_id, term, phonetic, pos, meaning, segs(JSON), story, model, source, created_at, updated_at)`，`UNIQUE(user_id, word_id)`。`wordvault_query` / `wordvault_status` 会带出卡片状态（`cardStats`: total / withCard / withoutCard / stale）。
+
+## 5. 数据模型（node:sqlite）
 
 ```
 users(id,name,enabled,created_at)
@@ -84,7 +127,7 @@ words(id,user_id,kind,term,lemma,first_seen_at,last_seen_at,seen_count,status,st
       UNIQUE(user_id,kind,lemma)                                  -- kind=word 单词 / kind=phrase 词组
 events(id,user_id,word_id,kind,via,context,capture_id,created_at) -- 每次录入一条,统计与回滚的依据
 captures(id PK,user_id,via,text,item_count,status,created_at,updated_at)
-exam_sessions / exam_answers                                      -- P3 考试闭环预留
+cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,created_at,updated_at)`r`n      UNIQUE(user_id,word_id)                                     -- 记忆卡内容(segs 存 JSON),出片可复现`r`nexam_sessions / exam_answers                                      -- P3 考试闭环预留
 ```
 
 - **计次口径**：同一批内按 `lemma` 去重（同一次录入里重复出现只算一次）；跨批次每录一次 `seen_count + 1`；`term` 保留最近一次原文形态，展示以 `lemma` 为准。
@@ -92,7 +135,7 @@ exam_sessions / exam_answers                                      -- P3 考试�
 - **撤销**：删掉该次 `capture_id` 的 events，受影响词条按剩余 events 重算；不再有任何 event 的词条整条删除（即"这次新建的"）。
 - **可重建性**：`words` 是 `events` 的投影，`rebuildCounters()` 可全量重算。
 
-## 5. 配置（settings 命名空间 `dsh-word-vault`）
+## 6. 配置（settings 命名空间 `dsh-word-vault`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -117,7 +160,7 @@ exam_sessions / exam_answers                                      -- P3 考试�
 | `maxWordsPerCapture` | 30 | 单次录入最多收多少词 |
 | `extraStopwords` | [] | 追加停用词 |
 
-## 6. 安装与重载
+## 7. 安装与重载
 
 ```powershell
 dsh plugin --profile web add D:/workout/deepseekharness/dsh-plugin/dsh-word-vault
@@ -131,12 +174,12 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 - 助手脚本改动（`scripts/capture.ps1`）：重启 DSH 会重新拉起助手即可生效。
 - 依赖：`@deepseek-ai/dsh-tools` 与 `dsh-llm` 声明为 **peerDependencies**（宿主共享包，避免插件市场"遮蔽宿主版本"告警），本机同时在 `devDependencies` 里保留，供 `npm install` 装进插件自己的 `node_modules`（link 安装不会替插件装依赖）。
 
-## 7. 测试
+## 8. 测试
 
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
-node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs
-# 38 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、插件契约与工具链路
+node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs
+# 57 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、`r`n#        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、`r`n#        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
@@ -150,7 +193,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 
 助手端到端测试**不需要人工操作**：它用 `EnumChildWindows` 找到弹窗里的按钮句柄，`SendMessage(BM_CLICK)` 真点一下，再断言命令文件；视觉测试用 `CopyFromScreen` 截图后逐像素比对颜色。
 
-## 8. 实测踩坑（都已在代码/测试里处理，改代码前务必看）
+## 9. 实测踩坑（都已在代码/测试里处理，改代码前务必看）
 
 **PowerShell / 助手侧**
 1. PS 5.1 把无 BOM 的 UTF-8 `.ps1` 当 ANSI/GBK 读 → 中文字面量被撕碎、语法报错。因此 `capture.ps1` **全 ASCII 源码**，中文文案从 UTF-8 JSON 配置注入。
@@ -174,19 +217,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 15. `todayFor()` 一度把用户对象当名字查（`String(obj)` → `[object Object]`）→ "今日累计"恒为 0；已修并有回归测试。
 16. 反馈不能等慢操作：翻译曾在落库之前 → 弹窗长时间停在"处理中…"。现在先落库+写回执，再补翻译。
 
-## 9. 路线
+## 10. 路线
 
 - **P1（已完成）** 剪贴板 + 点选弹窗录入、对话录入、翻译落库、查询统计、撤销/改库
-- **P2** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc），沿用 workbuddy 专家包的卡片版式与「拆解三法」
+- **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
 - **P3** 考试闭环：英译汉单选（干扰项优先取同库词义）→ 在线答题 → 判分回写 → 连续 3 次答对打「已学会」、答错清零、已学会词 10% 抽样复查
 - **P4** 拍照通道：颜色掩码定位标记（荧光笔色块 + 红色下划线）→ 连通域聚类 → 裁剪 → 视觉模型只读印刷体 → 批量入库；判不清一律丢弃
 - **P5** 词库管理界面（浏览 / 改释义 / 删词 / 手动改标签）+ 统计（高频榜 / 最近新增 / 久未复习）
 
-## 10. 版本与回滚
+## 11. 版本与回滚
 
 本仓库（https://github.com/wangzhanchao883/dsh-word-vault）是插件的独立源码仓库，存在的意义就是**改炸了能回到已知可用状态**。
 
-- **已打标签**：`v0.1.0-p1` = P1 交付时点（38 项 node 测试 + 17 项助手交互断言 + 14 项视觉/拖动断言全绿）
+- **已打标签**：`v0.1.0-p1` = P1 交付（38+17+14 全绿）；`v0.2.0-p2` = P2 交付（57 项 node 测试 + 17 项助手 + 14 项视觉全绿，记忆卡出片可用）
 - **整仓回滚到该标签**（会丢弃未提交改动，先确认或先 stash）：
   ```powershell
   cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault

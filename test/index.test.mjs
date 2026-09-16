@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { apply, name as pluginName, inject as pluginInject } from "../index.mjs";
 
 /** 最小假 DSH 运行时:只为验证契约(工具注册/设置命名空间/effect 生命周期) */
-function fakeRuntime() {
+function fakeRuntime({ llm } = {}) {
   const tools = new Map();
   const effects = [];
   const settingsNamespaces = [];
@@ -23,7 +23,7 @@ function fakeRuntime() {
       cb(ctx);
     },
     get(key) {
-      return key === "llm" ? undefined : undefined;
+      return key === "llm" ? llm : undefined;
     },
     tools: {
       register(tool) {
@@ -67,7 +67,7 @@ test("插件契约:name/inject/apply 齐全", () => {
   assert.equal(typeof apply, "function");
 });
 
-test("注册 5 个工具 + 设置命名空间 + effect 生命周期", () => {
+test("注册 7 个工具 + 设置命名空间 + effect 生命周期", () => {
   const dir = tempDir();
   const rt = fakeRuntime();
   try {
@@ -75,7 +75,9 @@ test("注册 5 个工具 + 设置命名空间 + effect 生命周期", () => {
     assert.deepEqual([...rt.tools.keys()].sort(), [
       "wordvault_add",
       "wordvault_capture_clipboard",
+      "wordvault_export_cards",
       "wordvault_fix_last",
+      "wordvault_make_cards",
       "wordvault_query",
       "wordvault_status",
     ]);
@@ -177,5 +179,110 @@ test("空输入与停用态给出明确提示", async () => {
     }
   } finally {
     cleanup(dir, rt.effects);
+  }
+});
+
+// ---------------------------------------------------------------- P2 工具链路
+
+/** 假 LLM:对提示词里出现的词逐个返回合格卡片(音节块拆解) */
+function cardFakeLlm(segMap) {
+  // 注意:提示词是被 JSON.stringify 进消息里的,内层引号会变成 \" —— 直接 includes('"map"') 永远不中
+  const hasWord = (prompt, w) => prompt.includes(`\\"${w}\\"`) || prompt.includes(`"${w}"`);
+  return {
+    stream(options) {
+      const prompt = JSON.stringify(options.messages);
+      const words = Object.keys(segMap).filter((w) => hasWord(prompt, w));
+      const payload = JSON.stringify(
+        words.map((w) => ({
+          word: w,
+          phonetic: `/${w}/`,
+          pos: "n.",
+          meaning: `${w}的释义`,
+          segs: segMap[w],
+          story: `${w} 的荒诞句`,
+        })),
+      );
+      async function* gen() {
+        yield { type: "text-delta", index: 0, text: payload };
+        yield { type: "finish", reason: { kind: "stop" } };
+      }
+      return gen();
+    },
+  };
+}
+
+const SEGS = {
+  map: [{ en: "ma", cn: "马" }, { en: "p", cn: "铺" }],
+  plant: [{ en: "plan", cn: "普兰" }, { en: "t", cn: "特" }],
+  tomato: [{ en: "to", cn: "特" }, { en: "ma", cn: "马" }, { en: "to", cn: "头" }],
+};
+
+test("P2 工具链路:make_cards 生成并入库 → export_cards 出 HTML", async () => {
+  const dir = tempDir();
+  const rt = fakeRuntime({ llm: cardFakeLlm(SEGS) });
+  try {
+    apply(rt.ctx, {
+      dbPath: join(dir, "words.db"),
+      helper: { enabled: false },
+      autoTranslate: false,
+      outputDir: join(dir, "out"),
+      users: [{ name: "用户1" }],
+    });
+    const exec = {};
+    await rt.tools.get("wordvault_add").execute({ text: "map tomato plant", user: "用户1" }, exec);
+
+    const made = JSON.parse(await rt.tools.get("wordvault_make_cards").execute({ user: "用户1", limit: 8 }, exec));
+    assert.equal(made.ok, true);
+    assert.equal(made.generated, 3, JSON.stringify(made));
+    assert.equal(made.failed.length, 0);
+    assert.equal(made.cardStats.withCard, 3);
+
+    // 再调一次:没缺的就不重复烧 token
+    const again = JSON.parse(await rt.tools.get("wordvault_make_cards").execute({ user: "用户1" }, exec));
+    assert.equal(again.generated, 0);
+    assert.match(String(again.message), /都已经有了/);
+
+    // 只重做某个词
+    const one = JSON.parse(await rt.tools.get("wordvault_make_cards").execute({ user: "用户1", words: "tomato", regenerate: true }, exec));
+    assert.equal(one.generated, 1);
+
+    const exported = JSON.parse(await rt.tools.get("wordvault_export_cards").execute({ user: "用户1", format: "html", limit: 8 }, exec));
+    assert.equal(exported.ok, true, JSON.stringify(exported));
+    assert.equal(exported.cards, 3);
+    assert.equal(exported.pages, 1);
+    assert.ok(exported.files.html && exported.files.html.endsWith(".html"));
+    assert.ok(existsSync(exported.files.html));
+    assert.match(readFileSync(exported.files.html, "utf8"), /map/);
+  } finally {
+    cleanup(dir, rt.effects);
+  }
+});
+
+test("P2 工具链路:无卡片时 export 自动补生成;生成失败给出可读结论", async () => {
+  const dir = tempDir();
+  const rt = fakeRuntime({ llm: cardFakeLlm(SEGS) });
+  try {
+    apply(rt.ctx, { dbPath: join(dir, "words.db"), helper: { enabled: false }, autoTranslate: false, outputDir: join(dir, "out") });
+    const exec = {};
+    await rt.tools.get("wordvault_add").execute({ text: "map", user: "用户1" }, exec);
+    const r = JSON.parse(await rt.tools.get("wordvault_export_cards").execute({ user: "用户1", format: "html" }, exec));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.generatedNow, 1, "缺卡时应先自动生成");
+    assert.equal(r.cards, 1);
+  } finally {
+    cleanup(dir, rt.effects);
+  }
+
+  const dir2 = tempDir();
+  const rt2 = fakeRuntime({ llm: null }); // ctx.llm 不可用
+  try {
+    apply(rt2.ctx, { dbPath: join(dir2, "words.db"), helper: { enabled: false }, autoTranslate: false, outputDir: join(dir2, "out") });
+    const exec = {};
+    await rt2.tools.get("wordvault_add").execute({ text: "map", user: "用户1" }, exec);
+    const bad = JSON.parse(await rt2.tools.get("wordvault_export_cards").execute({ user: "用户1", format: "html" }, exec));
+    assert.equal(bad.ok, false);
+    assert.match(String(bad.message), /生成失败/);
+  } finally {
+    cleanup(dir2, rt2.effects);
   }
 });
