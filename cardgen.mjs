@@ -173,7 +173,9 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
         provider,
         model,
         messages: [await createUserMsg(prompt)],
-        maxTokens: Math.min(8000, 700 * batch.length + 300),
+        // 预算要给足:宿主的模型可能带推理(reasoning),推理 token 也算在 maxTokens 里,
+      // 预算太小会把 JSON 挤掉,表现就是"模型未返回该词"(实测 6 词 4500 全部失败)
+      maxTokens: Math.min(16000, 2500 * batch.length + 2000),
         temperature: 0.9,
       },
       signal,
@@ -187,8 +189,27 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
    * 却不知道原因;拆半重试能把大部分词救回来,救不回的才记失败。
    */
   const askBatchResilient = async (batch) => {
+    const isEmpty = (list) => !Array.isArray(list) || list.length === 0;
     try {
-      return { parsed: await askOnce(batch, ""), error: "" };
+      const parsed = await askOnce(batch, "");
+      // 调用没抛错但一个词都没解析出来 = 同样失败(实测:模型返回的形状不被接受时会这样),
+      // 必须走拆半重试,否则用户看到的就是"6 个词全部 模型未返回该词"
+      if (!isEmpty(parsed)) return { parsed, error: "" };
+      if (logger) logger.warn(`dsh-word-vault: 记忆卡批次解析为空(${batch.length} 词),拆半重试`);
+      if (batch.length <= 1) {
+        const again = await askOnce(batch, "");
+        return { parsed: again, error: isEmpty(again) ? "模型返回内容无法解析" : "" };
+      }
+      const half = Math.ceil(batch.length / 2);
+      const out = [];
+      for (const part of [batch.slice(0, half), batch.slice(half)]) {
+        try {
+          out.push(...(await askOnce(part, "")));
+        } catch (err2) {
+          if (logger) logger.warn(`dsh-word-vault: 半批失败 - ${err2 && err2.message ? err2.message : err2}`);
+        }
+      }
+      return { parsed: out, error: out.length ? "" : "模型返回内容无法解析" };
     } catch (err) {
       const msg = err && err.message ? err.message : String(err);
       if (logger) logger.warn(`dsh-word-vault: 记忆卡批次失败(${batch.length} 词),拆半重试 - ${msg}`);
