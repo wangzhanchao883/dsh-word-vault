@@ -254,23 +254,26 @@ export class CaptureService {
     for (const [k, v] of this.pending) if (now - v.at > ttl) this.pending.delete(k);
     if (all.length) this.pending.set(id, { text, at: now, wordCount: all.length, via });
 
-    // 先补翻译,让弹窗能显示"词 — 中文意思"
-    if (all.length) {
+    // 立刻弹窗(带已知的释义)——不能让用户等翻译
+    const promptWrite = (extra) => {
       try {
-        await this.translateMissing(all.map((w) => ({ term: w, lemma: w })));
+        writeFileSync(
+          this.promptPath,
+          JSON.stringify({ id, at: new Date().toISOString(), wordCount: all.length, words: all, lines: all.map((w) => ({ word: w, meaning: this.meaningOf(w) || "" })), preview: text.slice(0, 200), via, ...extra }),
+          "utf8",
+        );
       } catch (err) {
-        this.logger.warn(`dsh-word-vault: 弹窗前翻译失败(仍然弹窗) - ${err && err.message ? err.message : err}`);
+        this.logger.warn(`dsh-word-vault: 提示文件写入失败 - ${err.message}`);
       }
-    }
-    const lines = all.map((w) => ({ word: w, meaning: this.meaningOf(w) || "" }));
-    try {
-      writeFileSync(
-        this.promptPath,
-        JSON.stringify({ id, at: new Date().toISOString(), wordCount: all.length, words: all, lines, preview: text.slice(0, 200), via }),
-        "utf8",
-      );
-    } catch (err) {
-      this.logger.warn(`dsh-word-vault: 提示文件写入失败 - ${err.message}`);
+    };
+    promptWrite({ meaningsReady: all.every((w) => !!this.meaningOf(w)) });
+    // 有词缺释义时后台补翻译,好了再用**同一个 id** 重写提示文件,弹窗原地显示"词 — 意思"并出现 OK
+    if (all.some((w) => !this.meaningOf(w))) {
+      void this.translateMissing(all.map((w) => ({ term: w, lemma: w })))
+        .then(() => {
+          if (this.pending.has(id)) promptWrite({ meaningsReady: true });
+        })
+        .catch((err) => this.logger.warn(`dsh-word-vault: 弹窗补翻译失败 - ${err && err.message ? err.message : err}`));
     }
     this.pushLog({ kind: "prompt", id, wordCount: all.length, words: all, via });
     return { id, wordCount: all.length, words: all };

@@ -39,6 +39,7 @@ $statusPath = [string]$cfg.statusPath
 $resultPath = [string]$cfg.resultPath
 $commandPath = [string]$cfg.commandPath
 $promptPath = [string]$cfg.promptPath
+$defaultUser = [string]$cfg.defaultUser
 $triggerPath = [string]$cfg.triggerPath
 $imageDir = [string]$cfg.imageDir
 $clipPollMs = if ($cfg.clipPollMs) { [int]$cfg.clipPollMs } else { 350 }
@@ -451,6 +452,28 @@ function Build-Dialog {
     $ig = New-Object System.Windows.Forms.Button
     $ig.Text = [string]$ui.ignoreLabel
     $script:applyBtn = $ig   # keep a script-scope handle so state changes can relabel it
+    # OK button: appears once the meanings arrive; commits to the default user (no need to pick)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = 'OK'
+    if ($ui.okLabel) { $ok.Text = [string]$ui.okLabel }
+    $ok.Tag = 'ok'
+    $ok.Left = $ig.Left; $ok.Top = $ig.Top
+    $ok.Width = 54; $ok.Height = $ig.Height
+    $ok.Font = $ig.Font
+    $ok.BackColor = $CLR.softBlue
+    $ok.ForeColor = $CLR.black
+    $ok.FlatStyle = $ig.FlatStyle
+    $ok.Visible = $false
+    $ok.Add_Click({
+        if ($script:promptId) {
+            Add-CommandLine 'commit' $script:promptId $defaultUser
+            $script:pendingCommit = $true
+            if ($script:dlgStatus) { $script:dlgStatus.Text = [string]$ui.pending }
+            Write-Status
+        }
+    })
+    $inner.Controls.Add($ok)
+    $script:okBtn = $ok
     # switch button label on state change (pick=ignore / result=OK)
     $ig.Tag = 'ignore'
     $ig.Left = $x; $ig.Top = 94; $ig.Width = $btnW; $ig.Height = 28
@@ -515,6 +538,11 @@ function Show-PromptDialog($prompt) {
     $script:dlgStatus.Text = ''
     foreach ($k in $script:dlgButtons.Keys) { $script:dlgButtons[$k].Visible = $true }
     $script:promptId = $id
+    if ($script:okBtn) {
+        $hasMeanings = $false
+        if ($prompt.lines) { foreach ($ln in @($prompt.lines)) { if ([string]$ln.meaning) { $hasMeanings = $true } } }
+        $script:okBtn.Visible = $hasMeanings
+    }
     $script:promptShownAt = Get-Date
     $script:pendingCommit = $false
     $script:resultShownAt = $null
@@ -525,6 +553,28 @@ function Show-PromptDialog($prompt) {
     $script:dlgVisible = $true
     Write-DebugLog ("DLG SHOW id=$id words=$($words.Count)")
     Write-Status
+}
+
+function Update-PromptMeanings($pr) {
+    if (-not $script:dlg) { return }
+    $sep = '  '
+    if ($ui.lineSep) { $sep = [string]$ui.lineSep }
+    $texts = @()
+    if ($pr.lines) {
+        foreach ($ln in @($pr.lines)) {
+            $w = [string]$ln.word
+            $m = [string]$ln.meaning
+            if ($m) { $texts += ($w + $sep + $m) } else { $texts += $w }
+        }
+    }
+    if ($texts.Count -gt 0) {
+        $body = ($texts | Select-Object -First 6) -join '   '
+        if ($texts.Count -gt 6) { $body = $body + '  ' + ($ui.promptMore -f ($texts.Count - 6)) }
+        $script:dlgBody.Text = $body
+    }
+    if ($script:okBtn) { $script:okBtn.Visible = $true }
+    $script:lastMeaningsAt = Get-Date
+    Write-DebugLog "DLG MEANINGS id=$($pr.id) lines=$($texts.Count)"
 }
 
 function Show-ResultInDialog($res) {
@@ -546,6 +596,7 @@ function Show-ResultInDialog($res) {
     }
     $script:dlgTitle.ForeColor = $CLR.black
     foreach ($k in $script:dlgButtons.Keys) { $script:dlgButtons[$k].Visible = $false }
+    if ($script:okBtn) { $script:okBtn.Visible = $false }
     # result state: the word is already saved -> the button just closes the window, label it OK
     $okText = 'OK'
     if ($ui.okLabel) { $okText = [string]$ui.okLabel }
@@ -687,6 +738,10 @@ try {
             $pr = Get-Prompt
             if ($pr -and $pr.id) {
                 $promptIdNow = [string]$pr.id
+                if ($promptIdNow -eq $script:lastPromptSeen -and $script:dlgVisible -and -not $script:pendingCommit) {
+                    # same prompt, but the host may have rewritten it with meanings -> refresh in place
+                    if ($pr.lines -and $script:lastMeaningsAt -eq $null) { Update-PromptMeanings $pr }
+                }
                 if ($promptIdNow -ne $script:lastPromptSeen) {
                     $script:lastPromptSeen = $promptIdNow
                     if ($pr.wordCount -and [int]$pr.wordCount -gt 0) {
