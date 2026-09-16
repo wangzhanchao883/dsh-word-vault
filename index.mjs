@@ -385,7 +385,9 @@ export function apply(ctx, input = {}) {
           },
         };
       },
-      /** 按页面筛选出题:paper=只出打印卷,answer=出卷并起答题页 */
+      /** 按页面筛选出题。
+       *  mode='answer' → 只起在线答题页(做完逐题判分并归档),不产 PDF;
+       *  mode='paper'  → 只出打印用 PDF(题目页 + 答案页),不起答题服务。 */
       exam: async ({ user, status, minCount, words, limit, mode }) => {
         const built = await buildExamFor({ user: user.name, status, minCount, words, count: limit, orderBy: "count" }, user, undefined);
         if (!built.gen.questions.length) {
@@ -394,7 +396,7 @@ export function apply(ctx, input = {}) {
         const session = persistExam(user, built.scope, built.gen);
         const title = "英语单词测验";
         const subtitle = `${user.name} · ${built.gen.questions.length} 题 · 来自词库页面`;
-        let url = null;
+
         if (mode === "answer") {
           const srv = await startExamServer({
             db,
@@ -404,19 +406,28 @@ export function apply(ctx, input = {}) {
             logger: ctx.logger,
             idleTimeoutMs: liveConfig.exam.minutes * 60 * 1000,
           });
-          if (srv.ok) {
-            examServers.add(srv);
-            url = srv.url;
-          }
+          if (!srv.ok) return { ok: false, error: srv.error || "答题服务启动失败" };
+          examServers.add(srv);
+          return {
+            ok: true,
+            mode: "answer",
+            sessionId: session.id,
+            questions: built.gen.questions.length,
+            url: srv.url,
+            message: "打开链接逐题作答：点选即判分，连对 3 次自动打「已学会」，成绩自动归档。",
+          };
         }
+
         const paper = await exportExamPaper(session.id, user, title, subtitle, "pdf");
+        const files = (paper && paper.files) || {};
         return {
           ok: true,
+          mode: "paper",
           sessionId: session.id,
           questions: built.gen.questions.length,
-          url,
-          files: (paper && paper.files) || {},
-          message: url ? undefined : "打印这份试卷纸笔作答；做完在对话里让我逐题录分即可",
+          files,
+          primary: files.paperPdf || files.paperHtml || null,
+          message: "打印这份试卷纸笔作答；做完在对话里让我逐题录分（也可以随时在页面上改成在线答题）。",
         };
       },
     },

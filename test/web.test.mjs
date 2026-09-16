@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -242,7 +242,7 @@ test("registerWebUi:有 webServer 时注册路由并可通过 HTTP 取到数据"
 });
 
 /** 把词库路由挂到一个真实 http 服务上(与宿主同款 (req,res) 签名) */
-async function mountRoute(db, actions = {}) {
+async function mountRoute(db, actions = {}, cfg = {}) {
   let route = null;
   const ctx = {
     logger: { info() {}, warn() {} },
@@ -253,7 +253,12 @@ async function mountRoute(db, actions = {}) {
       cb({ webServer: { register: (r) => { route = r; return () => {}; } } });
     },
   };
-  registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 } }, logger: ctx.logger, actions });
+  registerWebUi(ctx, {
+    db, queryWords, stats, cardStats,
+    liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 }, ...cfg },
+    logger: ctx.logger,
+    actions,
+  });
   assert.ok(route, "路由应已注册");
   const srv = createServer((req, res) => route.handler(req, res));
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
@@ -263,7 +268,11 @@ async function mountRoute(db, actions = {}) {
     const res = await fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     return { status: res.status, data: await res.json().catch(() => ({})) };
   };
-  return { base, post, close: () => new Promise((r) => srv.close(r)) };
+  const get = async (path) => {
+    const res = await fetch(base + path);
+    return { status: res.status, headers: res.headers, text: await res.text() };
+  };
+  return { base, post, get, close: () => new Promise((r) => srv.close(r)) };
 }
 
 test("写操作:改释义 / 手动掌握度 / 删除预览 / 删除(连带清理,外键回归)", async () => {
@@ -370,6 +379,81 @@ test("动作:出卡/出卷走注入的实现,按分组与搜索解析范围", as
     closeDb(s2.db);
     rmSync(s2.dir, { recursive: true, force: true });
   }
+});
+
+test("文件路由:输出目录内的文件可直接从页面打开,目录外一律 403", async () => {
+  const s = setup();
+  const outDir = join(s.dir, "out");
+  mkdirSync(outDir, { recursive: true });
+  const pdf = join(outDir, "paper.pdf");
+  writeFileSync(pdf, "%PDF-1.4 fake");
+  const png = join(outDir, "preview.png");
+  writeFileSync(png, "not-really-png");
+  const outside = join(s.dir, "secret.txt");
+  writeFileSync(outside, "secret");
+
+  const r = await mountRoute(s.db, {}, { outputDir: outDir });
+  try {
+    const ok = await r.get(`/file?p=${encodeURIComponent(pdf)}`);
+    assert.equal(ok.status, 200);
+    assert.match(ok.headers.get("content-type"), /application\/pdf/);
+    assert.match(ok.text, /%PDF/);
+
+    const img = await r.get(`/file?p=${encodeURIComponent(png)}`);
+    assert.equal(img.status, 200);
+    assert.match(img.headers.get("content-type"), /image\/png/);
+
+    assert.equal((await r.get(`/file?p=${encodeURIComponent(outside)}`)).status, 403);
+    assert.equal((await r.get(`/file?p=${encodeURIComponent(join(outDir, "..", "secret.txt"))}`)).status, 403, "路径穿越也要挡住");
+    assert.equal((await r.get(`/file?p=${encodeURIComponent(join(outDir, "nope.pdf"))}`)).status, 404);
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test("出卷两种模式:在线答题只给链接不产文件;打印试卷只给 PDF 不启答题服务", async () => {
+  const s = setup();
+  const seen = [];
+  const actions = {
+    exam: async (req) => {
+      seen.push(req.mode);
+      if (req.mode === "answer") {
+        return { ok: true, mode: "answer", questions: 5, url: "http://127.0.0.1:9999/e/tok", message: "打开链接逐题作答" };
+      }
+      return { ok: true, mode: "paper", questions: 5, files: { paperPdf: "X:/p.pdf", keyPdf: "X:/k.pdf" }, primary: "X:/p.pdf" };
+    },
+  };
+  const r = await mountRoute(s.db, actions);
+  try {
+    const ans = await r.post("/api/actions/exam", { group: "hot", count: 5, mode: "answer" });
+    assert.equal(ans.status, 200);
+    assert.match(ans.data.url, /^http:/);
+    assert.equal(ans.data.files, undefined, "在线答题不该产文件列表");
+    const paper = await r.post("/api/actions/exam", { group: "hot", count: 5, mode: "paper" });
+    assert.equal(paper.status, 200);
+    assert.equal(paper.data.url, undefined, "打印模式不该起答题服务");
+    assert.ok(paper.data.files.paperPdf);
+    assert.equal(paper.data.primary, "X:/p.pdf");
+    assert.deepEqual(seen, ["answer", "paper"]);
+    await r.post("/api/actions/exam", { group: "hot", count: 5 });
+    assert.equal(seen[2], "paper", "不传 mode 时缺省走打印");
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test("页面按钮:在线答题 / 打印试卷 PDF 两个入口,文件走 /file 路由", () => {
+  const html = buildLibraryPageHtml({ userName: "用户1", highFreqMin: 2 });
+  assert.ok(html.includes('id="actAnswer"'), "应有在线答题按钮");
+  assert.ok(html.includes('id="actPaper"'), "应有打印试卷按钮");
+  assert.ok(html.includes("在线答题") && html.includes("打印试卷 PDF"));
+  assert.ok(!html.includes('id="actExam"'), "旧的合并按钮应删除");
+  assert.ok(html.includes("/file?p="), "文件应通过 /file 路由打开,而不是只给路径");
+  assert.ok(html.includes("data-open"), "应提供在系统里打开目录的入口");
 });
 
 test("registerWebUi:没有 webServer 服务时静默跳过(不影响 headless)", () => {

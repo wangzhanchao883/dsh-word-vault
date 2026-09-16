@@ -11,6 +11,9 @@
  * 写操作(改释义/删词/批量清理)与动作按钮(出卡/出卷/开始答题)留到 P5.2。
  */
 import { nowIso, updateDictMeaning, wordDeleteImpact, deleteWords, setStatus } from "./db.mjs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, resolve, sep } from "node:path";
+import { spawn } from "node:child_process";
 
 /** 页面与 API 共用的路由前缀(prefix 路由:'/word-vault' 同时匹配它自己与子路径) */
 export const WEB_PATH = "/word-vault";
@@ -164,6 +167,11 @@ input.edit.small { width:90px; }
 .result.err { border-left-color:var(--hot); background:#fdeaea; }
 .result.hide { display:none; }
 .result code { background:#f2f6fa; padding:1px 5px; border-radius:4px; font-size:12px; }
+/* 结果区的主入口:大按钮,点了直接开(答题页 / PDF),不让用户去路径里找 */
+a.bigbtn { display:inline-block; margin:6px 8px 2px 0; padding:9px 16px; border-radius:8px; background:var(--blue); color:#fff;
+  text-decoration:none; font-size:14px; font-weight:700; }
+a.bigbtn:hover { background:#17497a; }
+details summary { cursor:pointer; margin-top:6px; }
 table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-top:14px; font-size:13px; }
 th, td { padding:8px 10px; border-bottom:1px solid #eaf1f7; text-align:left; vertical-align:top; white-space:nowrap; }
 th { background:var(--soft); font-size:12px; color:#41556b; position:sticky; top:0; }
@@ -198,8 +206,8 @@ td.mean { white-space:normal; min-width:180px; }
   <span class="spacer"></span>
   <span class="meta">对当前筛选：</span>
   <button class="btn primary" id="actCards">出记忆卡</button>
-  <button class="btn primary" id="actPaper">出试卷</button>
-  <button class="btn primary" id="actExam">开始答题</button>
+  <button class="btn primary" id="actAnswer">在线答题</button>
+  <button class="btn primary" id="actPaper">打印试卷 PDF</button>
 </div>
 <div class="result hide" id="result"></div>
 <table><thead><tr>
@@ -359,24 +367,72 @@ async function doDelete() {
 }
 
 async function doAction(kind) {
-  const btn = document.getElementById(kind === 'cards' ? 'actCards' : kind === 'paper' ? 'actPaper' : 'actExam');
+  const btn = document.getElementById(kind === 'cards' ? 'actCards' : kind === 'paper' ? 'actPaper' : 'actAnswer');
   const old = btn.textContent;
-  btn.disabled = true; btn.textContent = '正在生成…';
+  btn.disabled = true;
+  btn.textContent = '正在生成…';
   showResult('正在按当前筛选生成（要调模型，可能需要十几秒）…');
   try {
-    const r = kind === 'cards'
-      ? await post('/api/actions/cards', { group: state.group, q: state.q, sort: state.sort, limit: 8 })
-      : await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: kind === 'paper' ? 'paper' : 'answer' });
+    if (kind === 'answer') {
+      // 在线答题:只给一个可点入口,不产文件
+      const r = await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: 'answer' });
+      showResult(
+        '<b>试卷已生成（' + r.questions + ' 题）</b><br>' +
+        '<a class="bigbtn" href="' + esc(r.url) + '" target="_blank" rel="noopener">👉 打开答题页，开始做题</a><br>' +
+        '<span class="meta">' + esc(r.message || '') + '</span>',
+        'ok',
+      );
+      return;
+    }
+    if (kind === 'paper') {
+      // 打印试卷:只给 PDF 入口(可在页面直接打开/下载)
+      const r = await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: 'paper' });
+      const fileLink = (p, label) => (p ? '<a class="bigbtn" href="' + BASE + '/file?p=' + encodeURIComponent(p) + '" target="_blank" rel="noopener">' + label + '</a>' : '');
+      showResult(
+        '<b>打印试卷已生成（' + r.questions + ' 题）</b><br>' +
+        fileLink(r.files.paperPdf, '🖨 打开试卷 PDF') +
+        fileLink(r.files.keyPdf, '📄 打开参考答案 PDF') +
+        '<br><span class="meta">' + esc(r.message || '') + '</span>' +
+        dirButton(r.primary),
+        'ok',
+      );
+      return;
+    }
+    // 出记忆卡:主入口给 PDF 预览,其余文件收进"更多"
+    const r = await post('/api/actions/cards', { group: state.group, q: state.q, sort: state.sort, limit: 8 });
     const f = r.files || {};
-    const lines = [];
-    if (r.url) lines.push('<a href="' + esc(r.url) + '" target="_blank">👉 打开答题页（逐题判分，连对 3 次自动打「已学会」）</a>');
-    for (const [k, v] of Object.entries(f)) if (v) lines.push('<span class="meta">' + esc(k) + '：</span> <code>' + esc(v) + '</code>');
-    if (r.message) lines.push(esc(r.message));
-    showResult('<b>' + (kind === 'cards' ? '记忆卡' : '试卷') + '已生成</b>（' + (r.cards || r.questions || 0) + ' 个词）<br>' + lines.join('<br>'), 'ok');
+    showResult(
+      '<b>记忆卡已生成（' + r.cards + ' 张' + (r.generatedNow ? '，新生成 ' + r.generatedNow + ' 张' : '') + '）</b><br>' +
+      (f.pdf ? '<a class="bigbtn" href="' + BASE + '/file?p=' + encodeURIComponent(f.pdf) + '" target="_blank" rel="noopener">🖨 打开记忆卡 PDF</a>' : '') +
+      (f.preview ? '<a class="bigbtn" href="' + BASE + '/file?p=' + encodeURIComponent(f.preview) + '" target="_blank" rel="noopener">🔍 看首页预览图</a>' : '') +
+      '<details><summary class="meta">其它格式（HTML / Word）</summary>' +
+      (f.word ? '<div><a href="' + BASE + '/file?p=' + encodeURIComponent(f.word) + '">Word .docx</a></div>' : '') +
+      (f.html ? '<div><a href="' + BASE + '/file?p=' + encodeURIComponent(f.html) + '">HTML</a></div>' : '') +
+      '</details>' +
+      dirButton(f.pdf || f.html),
+      'ok',
+    );
   } catch (e) {
     showResult('生成失败：' + esc(e.message), 'err');
   } finally {
-    btn.disabled = false; btn.textContent = old;
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/** 把文件所在目录用系统窗口打开(省得用户去翻路径) */
+function dirButton(filePath) {
+  if (!filePath) return '';
+  const dir = String(filePath).replace(/[\\/][^\\/]*$/, '');
+  return '<br><button class="mini" data-open="' + esc(dir) + '">📁 在系统里打开输出目录</button>';
+}
+
+async function openPath(p) {
+  try {
+    await post('/api/open', { path: p });
+    showResult('已用系统默认程序打开：<code>' + esc(p) + '</code>', 'ok');
+  } catch (e) {
+    showResult('打开失败：' + esc(e.message), 'err');
   }
 }
 
@@ -392,7 +448,12 @@ document.getElementById('markOn').addEventListener('click', () => markSelected(t
 document.getElementById('markOff').addEventListener('click', () => markSelected(false));
 document.getElementById('actCards').addEventListener('click', () => doAction('cards'));
 document.getElementById('actPaper').addEventListener('click', () => doAction('paper'));
-document.getElementById('actExam').addEventListener('click', () => doAction('exam'));
+document.getElementById('actAnswer').addEventListener('click', () => doAction('answer'));
+// 结果区里的"在系统里打开目录"按钮是动态生成的 -> 事件委托
+document.getElementById('result').addEventListener('click', (e) => {
+  const t = e.target.closest('button[data-open]');
+  if (t) openPath(t.dataset.open);
+});
 
 async function markSelected(mastered) {
   const words = [...state.selected];
@@ -507,6 +568,40 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
         send(res, 200, buildLibraryPageHtml({ userName: liveConfig.defaultUser, highFreqMin: liveConfig.highFreqMin }), "text/html; charset=utf-8");
         return;
       }
+      // 把生成的文件直接从页面打开(否则用户得自己去路径里翻) —— 限定在允许的目录内
+      if (!isWrite && sub === "/file") {
+        const abs = resolve(String(url.searchParams.get("p") || ""));
+        const roots = [liveConfig.outputDir, liveConfig.photo && liveConfig.photo.outDir, liveConfig.photoOutDir]
+          .filter(Boolean)
+          .map((r) => resolve(String(r)));
+        const lower = abs.toLowerCase();
+        const inside = roots.some((r) => {
+          const rl = r.toLowerCase();
+          return lower === rl || lower.startsWith(rl.endsWith(sep) ? rl : rl + sep);
+        });
+        if (!inside) {
+          send(res, 403, { ok: false, error: "只允许访问输出目录内的文件" });
+          return;
+        }
+        if (!existsSync(abs) || !statSync(abs).isFile()) {
+          send(res, 404, { ok: false, error: "文件不存在" });
+          return;
+        }
+        const type =
+          {
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".html": "text/html; charset=utf-8",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".csv": "text/csv; charset=utf-8",
+          }[extname(abs).toLowerCase()] || "application/octet-stream";
+        const buf = readFileSync(abs);
+        res.writeHead(200, { "Content-Type": type, "Content-Length": buf.length, "Cache-Control": "no-store" });
+        res.end(buf);
+        return;
+      }
       if (!isWrite && sub === "/api/library") {
         const user = pickUser(url.searchParams.get("user"));
         if (!user) {
@@ -568,6 +663,30 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
       }
       if (sub === "/api/words/delete-preview") {
         send(res, 200, { ok: true, impact: wordDeleteImpact(db, user.id, body.words) });
+        return;
+      }
+      // 用系统默认程序打开文件/目录(仍然限定在允许目录内),省得用户自己去翻路径
+      if (sub === "/api/open") {
+        const abs = resolve(String(body.path || ""));
+        const roots = [liveConfig.outputDir, liveConfig.photo && liveConfig.photo.outDir]
+          .filter(Boolean)
+          .map((r) => resolve(String(r)));
+        const lower = abs.toLowerCase();
+        const inside = roots.some((r) => {
+          const rl = r.toLowerCase();
+          return lower === rl || lower.startsWith(rl.endsWith(sep) ? rl : rl + sep);
+        });
+        if (!inside || !existsSync(abs)) {
+          send(res, 403, { ok: false, error: "只能打开输出目录内已存在的文件" });
+          return;
+        }
+        try {
+          spawn("cmd", ["/c", "start", "", abs], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+          if (logger) logger.info(`dsh-word-vault: 页面请求用系统程序打开 ${abs}`);
+          send(res, 200, { ok: true, opened: abs });
+        } catch (err) {
+          send(res, 500, { ok: false, error: `打开失败:${err.message}` });
+        }
         return;
       }
       if (sub === "/api/words/delete") {

@@ -278,12 +278,16 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 | 删除预览 | `POST /api/words/delete-preview` | 先列出**会连带清掉什么**（录入记录 / 记忆卡 / 考试题 / 作答条数） |
 | 删除 | `POST /api/words/delete` | 勾选 → 弹窗确认（列出单词与影响）→ 执行；返回逐词清理回执 |
 | 出记忆卡 | `POST /api/actions/cards` | 按当前筛选（分组/搜索/排序）→ 缺卡片的先调模型补生成 → HTML/PDF/Word + 预览图 |
-| 出试卷 | `POST /api/actions/exam` `mode=paper` | 按当前筛选出题 → 题目页 + 答案页 PDF |
-| 开始答题 | `POST /api/actions/exam` `mode=answer` | 同上并起本地答题页，页面直接给可点链接（P3 那套，逐题判分回写） |
+| **在线答题** | `POST /api/actions/exam` `mode=answer` | 只出题 + 起本地答题页（**不产 PDF**），页面给一个大按钮直接开做；逐题判分、连对 3 次打「已学会」、成绩归档入库 |
+| **打印试卷 PDF** | `POST /api/actions/exam` `mode=paper` | 只出打印用 PDF（题目页 + 答案页，**不起答题服务**），页面给「打开试卷 PDF / 打开参考答案」两个按钮 |
+| 打开文件 | `GET /file?p=<绝对路径>` | 把生成的文件**从页面直接打开**（PDF 内嵌打开、图片预览、HTML 直接看）——用户不用再去路径里翻；只允许输出目录内的文件，越界/穿越一律 403 |
+| 打开目录 | `POST /api/open` | 用系统默认程序打开文件或其所在目录（同样限定在输出目录内） |
 
 **删除必须连带清理（实测坑）**：库开着 `PRAGMA foreign_keys = ON`，而旧的 `deleteWord` 只删 `events + words` —— 于是**任何有记忆卡或考过试的词都删不掉**（SQLite 直接抛 `FOREIGN KEY constraint failed`）。现在按外键依赖顺序清：`exam_answers → exam_questions → cards → events → words`，并有专门的回归测试守着。
 
-**安全**：写操作一律 `POST` + `Content-Type: application/json`（挡掉简单表单式跨站提交，缺类型回 415）；非 GET/POST 回 405；删除**必先预览影响再确认**。
+**安全**：写操作一律 `POST` + `Content-Type: application/json`（挡掉简单表单式跨站提交，缺类型回 415）；非 GET/POST 回 405；删除**必先预览影响再确认**；`/file` 与 `/api/open` 都做目录白名单（防路径穿越）。
+
+**交付形态（用户反馈后改的）**：早先点一次「出试卷」会一次抛出 5 个文件路径（paperHtml/keyHtml/paperPdf/keyPdf/preview），要用户自己去翻——现在拆成两个语义明确的按钮（**在线答题** / **打印试卷 PDF**），结果区只给**可点的主入口**（答题页链接、PDF 链接），其余格式收进「其它格式」折叠区。
 
 **页面筛选 → 查询范围**（`resolveScope`，纯函数、有单测）：`hot` = `status=learning` + `minCount=highFreqMin`；搜索词按「指定词」处理（出题侧用 `scope.includeWords`）；数量上限 200。
 
@@ -371,7 +375,7 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
 node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs
-# 117 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+# 120 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
