@@ -248,15 +248,40 @@ test("选项展示:义项最多留 2 个(避免正确答案比干扰项长一截
   assert.equal(trimMeaning("院子;庭院;码"), "院子;庭院");
   assert.equal(trimMeaning("院子;庭院"), "院子;庭院");
   assert.equal(trimMeaning("地图"), "地图");
+  assert.equal(trimMeaning("安慰;安慰"), "安慰", "重复义项要去掉");
   const composed = composeQuestion({
     item: { word: "yard", meaning: "院子;庭院;码", pos: "n.", sentence: "They play in the yard." },
-    raw: { word: "yard", sentence: "They play in the yard.", distractors: ["厨房", "操场"] },
+    raw: { word: "yard", sentence: "They play in the yard.", distractors: ["厨房", "操场", "车库"] },
     answerIndex: 1,
     pool: { samePos: [], others: [] },
     rng: makeRng(2),
   });
-  assert.equal(composed.ok, true);
+  assert.equal(composed.ok, true, JSON.stringify(composed.issues));
+  assert.equal(composed.question.options.length, 4);
   assert.ok(composed.question.options.every((o) => o.split(/[;；]/).filter(Boolean).length <= 2), composed.question.options.join(" / "));
+});
+
+test("回归:干扰项凑不满 4 个选项时判废题,不再产出只有 2~3 个选项的题", () => {
+  const few = composeQuestion({
+    item: { word: "regression", meaning: "倒退;回归;退化", pos: "n.", sentence: "A regression line." },
+    raw: { word: "regression", sentence: "A regression line.", distractors: ["回归", "退化"] },
+    answerIndex: 0,
+    pool: { samePos: [], others: [] },
+    rng: makeRng(3),
+  });
+  assert.equal(few.ok, false, "凑不满 4 个选项必须是废题");
+  assert.match(few.issues.join(), /干扰项不足/);
+
+  const filled = composeQuestion({
+    item: { word: "regression", meaning: "倒退;回归;退化", pos: "n.", sentence: "A regression line." },
+    raw: { word: "regression", sentence: "A regression line.", distractors: ["回归"] },
+    answerIndex: 0,
+    pool: { samePos: [{ meaning: "土豆" }, { meaning: "地图" }], others: [{ meaning: "厨房" }] },
+    rng: makeRng(3),
+  });
+  assert.equal(filled.ok, true, JSON.stringify(filled.issues));
+  assert.equal(filled.question.options.length, 4);
+  assert.equal(new Set(filled.question.options).size, 4);
 });
 
 test("选词:scope.status=mastered 时已学会词是主池(专项复查)", () => {

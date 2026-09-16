@@ -190,14 +190,29 @@ export function pickExamWords({ db, queryWords, userId, scope = {}, count = 10, 
   };
 }
 
-/** 同库同词性的其他词义(干扰项优先来源) */
-export function libraryDistractorPool(db, userId, pos, excludeLemma) {
-  const rows = db
-    .prepare(
-      `SELECT w.lemma, d.meaning, d.pos FROM words w JOIN dict d ON d.term = w.lemma
-       WHERE w.user_id = ? AND w.kind = 'word' AND w.lemma <> ? AND d.meaning <> ''`,
-    )
-    .all(userId, String(excludeLemma || "").toLowerCase());
+/**
+ * 干扰项池(同词性优先)。
+ *
+ * `scope: "user"` 只看这个用户的库;`scope: "all"`(缺省)看**整个词典**(跨用户)。
+ * 为什么需要跨用户:实测一个只有 3 个词的小库(王展超)出题时,同库池是空的,
+ * 模型给的干扰项又多是正确答案的近义义项(被撞义去重挡住) -> 只剩 2 个选项。
+ * 词典表本来就是全局的(term 唯一),跨用户取词义既安全又能保证干扰项数量。
+ */
+export function libraryDistractorPool(db, userId, pos, excludeLemma, { scope = "all" } = {}) {
+  const rows =
+    scope === "user"
+      ? db
+          .prepare(
+            `SELECT w.lemma, d.meaning, d.pos FROM words w JOIN dict d ON d.term = w.lemma
+             WHERE w.user_id = ? AND w.kind = 'word' AND w.lemma <> ? AND d.meaning <> ''`,
+          )
+          .all(userId, String(excludeLemma || "").toLowerCase())
+      : db
+          .prepare(
+            `SELECT w.lemma, d.meaning, d.pos FROM words w JOIN dict d ON d.term = w.lemma
+             WHERE w.kind = 'word' AND w.lemma <> ? AND d.meaning <> ''`,
+          )
+          .all(String(excludeLemma || "").toLowerCase());
   const norm = (p) => String(p || "").toLowerCase().replace(/[.\s]/g, "");
   const wantPos = norm(pos);
   const samePos = [];
@@ -282,11 +297,15 @@ export function parseExamOutput(text) {
 
 const clean = (v) => String(v == null ? "" : v).trim();
 
-/** 选项展示用:义项最多留 2 个(避免正确答案比干扰项长一截、被一眼认出) */
+/** 选项展示用:义项去重、最多留 2 个(避免正确答案比干扰项长一截、或出现"安慰;安慰") */
 export function trimMeaning(text, maxVariants = 2) {
-  const parts = String(text == null ? "" : text).split(/[;；]/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length <= maxVariants) return String(text == null ? "" : text).trim();
-  return parts.slice(0, maxVariants).join(";");
+  const parts = String(text == null ? "" : text)
+    .split(/[;；]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const uniq = [...new Set(parts)];
+  if (uniq.length <= maxVariants) return uniq.join(";") || String(text == null ? "" : text).trim();
+  return uniq.slice(0, maxVariants).join(";");
 }
 
 /**
@@ -346,7 +365,11 @@ export function composeQuestion({ item, raw, answerIndex, pool, rng }) {
       pushDistractor(cand.meaning, "library-other");
     }
   }
-  if (take.length < 3) issues.push(`干扰项不足(只有 ${take.length} 个)`);
+  // 不满 4 个选项就是**废题**(实测踩过:小库出题只剩 2 个选项,甚至 1 个) -> 判失败,交给重试/跳过
+  if (take.length < 3) {
+    issues.push(`干扰项不足(只有 ${take.length} 个,凑不满 4 个选项)`);
+    return { ok: false, issues };
+  }
   if (!sentence || !correct) return { ok: false, issues };
 
   const options = [...take];
@@ -519,6 +542,47 @@ export async function generateExam({
     }
     // 非句子类失败原样保留
     failures = failures.filter((f) => !f.reasons.some((r) => r.includes("缺少包含该词的句子"))).concat(stillFailing);
+  }
+
+  // 干扰项不足重试:实测小库里模型爱把"本词的其他义项/近义表达"当干扰项(被撞义去重挡掉后会凑不满 4 个选项)
+  const distractorFails = failures.filter((f) => f.reasons.some((r) => r.includes("干扰项不足")));
+  if (distractorFails.length && llm && typeof llm.stream === "function") {
+    const targets = distractorFails.map((f) => items.find((it) => it.word === f.word)).filter(Boolean);
+    if (targets.length) {
+      try {
+        const parsed = await askOnce(
+          targets,
+          distractorFails
+            .map((f) => `- ${f.word}: ${f.reasons.join("；")}。这 3 个干扰项必须是**别的词**的释义，绝不能是本词的其他义项或近义表达。`)
+            .join("\n"),
+        );
+        const map = new Map(parsed.map((p) => [clean(p && p.word).toLowerCase(), p]));
+        const still = [];
+        for (const f of distractorFails) {
+          const item = items.find((it) => it.word === f.word);
+          if (!item) continue;
+          const idx = items.indexOf(item);
+          const pool = libraryDistractorPool(db, userId, item.pos, item.word);
+          const composed = composeQuestion({
+            item,
+            raw: map.get(f.word) || rawMap.get(f.word),
+            answerIndex: positions[idx],
+            pool,
+            rng,
+          });
+          if (composed.ok) {
+            questions.push({ ...composed.question, wordId: item.row.id, isRecheck: item.recheck, pos: item.pos });
+            okWords.add(item.word);
+            if (logger) logger.info(`dsh-word-vault: 补干扰项救回 ${item.word}`);
+          } else {
+            still.push({ word: f.word, reasons: composed.issues });
+          }
+        }
+        failures = failures.filter((f) => !f.reasons.some((r) => r.includes("干扰项不足"))).concat(still);
+      } catch (err) {
+        if (logger) logger.warn(`dsh-word-vault: 补干扰项调用失败 - ${err && err.message ? err.message : err}`);
+      }
+    }
   }
 
   // 保序输出(与选词顺序一致),便于试卷与位置分布可预期
