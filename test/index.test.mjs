@@ -67,7 +67,7 @@ test("插件契约:name/inject/apply 齐全", () => {
   assert.equal(typeof apply, "function");
 });
 
-test("注册 7 个工具 + 设置命名空间 + effect 生命周期", () => {
+test("注册 11 个工具 + 设置命名空间 + effect 生命周期", () => {
   const dir = tempDir();
   const rt = fakeRuntime();
   try {
@@ -75,6 +75,10 @@ test("注册 7 个工具 + 设置命名空间 + effect 生命周期", () => {
     assert.deepEqual([...rt.tools.keys()].sort(), [
       "wordvault_add",
       "wordvault_capture_clipboard",
+      "wordvault_exam_answer",
+      "wordvault_exam_paper",
+      "wordvault_exam_result",
+      "wordvault_exam_start",
       "wordvault_export_cards",
       "wordvault_fix_last",
       "wordvault_make_cards",
@@ -284,5 +288,94 @@ test("P2 工具链路:无卡片时 export 自动补生成;生成失败给出可�
     assert.match(String(bad.message), /生成失败/);
   } finally {
     cleanup(dir2, rt2.effects);
+  }
+});
+
+// ---------------------------------------------------------------- P3 考试工具链路
+
+/** 假 LLM:翻译请求返回释义;出题请求返回"含该词的句子 + 三个干扰项" */
+function examFakeLlm() {
+  return {
+    stream(options) {
+      const prompt = JSON.stringify(options.messages);
+      const isTranslate = prompt.includes("英语词典编辑");
+      let payload;
+      if (isTranslate) {
+        // 翻译提示词里是纯词表(每行一个词),不是 JSON —— 按已知词表筛出本次要翻的词
+        const known = ["meet", "share", "make", "plant", "tomato", "map", "world", "photo", "kind", "health", "potato"];
+        const terms = known.filter((w) => prompt.includes(w));
+        payload = JSON.stringify(terms.map((t) => ({ term: t, phonetic: `/${t}/`, pos: "v.", meaning: `${t}释义` })));
+      } else {
+        const words = [];
+        const re = /\\"word\\":\\"([a-z]+)\\"/g;
+        let m;
+        while ((m = re.exec(prompt))) words.push(m[1]);
+        payload = JSON.stringify(
+          words.map((w) => ({ word: w, sentence: `We ${w} at school every day.`, distractors: [`${w}错一`, `${w}错二`, `${w}错三`], pos: "v." })),
+        );
+      }
+      async function* gen() {
+        yield { type: "text-delta", index: 0, text: payload };
+        yield { type: "finish", reason: { kind: "stop" } };
+      }
+      return gen();
+    },
+  };
+}
+
+test("P3 工具链路:exam_start → 答题 → 结算 → 出卷", async () => {
+  const dir = tempDir();
+  const rt = fakeRuntime({ llm: examFakeLlm() });
+  try {
+    apply(rt.ctx, {
+      dbPath: join(dir, "words.db"),
+      helper: { enabled: false },
+      autoTranslate: false,
+      outputDir: join(dir, "out"),
+      users: [{ name: "用户1" }],
+      exam: { count: 4, batchSize: 4 },
+    });
+    const exec = {};
+    await rt.tools.get("wordvault_add").execute({ text: "meet share make plant", user: "用户1" }, exec);
+
+    const started = JSON.parse(await rt.tools.get("wordvault_exam_start").execute({ user: "用户1", count: 4, paper: true, seed: 11 }, exec));
+    assert.equal(started.ok, true, JSON.stringify(started));
+    assert.equal(started.questions, 4);
+    assert.match(started.url, /^http:\/\/127\.0\.0\.1:\d+\/e\/[0-9a-f]+$/);
+    assert.deepEqual(started.answerSpread, [1, 1, 1, 1], `答案位置应均衡,实际 ${started.answerSpread}`);
+    assert.equal(started.recheck, 0);
+    assert.ok(started.paper && started.paper.paperHtml && existsSync(started.paper.paperHtml));
+    assert.ok(existsSync(started.paper.keyHtml));
+
+    // 答题页能打开且不带答案
+    const page = await fetch(started.url).then((r) => r.text());
+    assert.match(page, /句中的/);
+    assert.ok(!page.includes("answerIndex"));
+
+    const sessionId = started.sessionId;
+    for (let seq = 1; seq <= 4; seq++) {
+      const r = JSON.parse(await rt.tools.get("wordvault_exam_answer").execute({ sessionId, seq, choice: "A" }, exec));
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(typeof r.isCorrect, "boolean");
+      assert.ok(["A", "B", "C", "D"].includes(r.correctLetter));
+    }
+
+    const result = JSON.parse(await rt.tools.get("wordvault_exam_result").execute({ sessionId }, exec));
+    assert.equal(result.total, 4);
+    assert.equal(result.answered, 4);
+    assert.ok(result.accuracy >= 0 && result.accuracy <= 100);
+    assert.equal(result.answerSpread.reduce((a, b) => a + b, 0), 4);
+
+    // 同一题重复作答会被拒
+    const dup = await rt.tools.get("wordvault_exam_answer").execute({ sessionId, seq: 1, choice: "B" }, exec);
+    assert.match(String(dup), /已经答过/);
+
+    // 换一份卷子也能出(纸笔用)
+    const paper = JSON.parse(await rt.tools.get("wordvault_exam_paper").execute({ sessionId, format: "html" }, exec));
+    assert.equal(paper.ok, true, JSON.stringify(paper));
+    assert.ok(existsSync(paper.files.paperHtml));
+    assert.match(readFileSync(paper.files.keyHtml, "utf8"), /参考答案/);
+  } finally {
+    cleanup(dir, rt.effects);
   }
 });

@@ -73,7 +73,7 @@ Ctrl+C 复制英文
 | `wordvault_query` | 按时间区间 / 出现次数区间 / 掌握状态 / 排序 查询词条 |
 | `wordvault_status` | 库统计 + 各用户 + 助手状态 + 最近录入日志（自检排障用） |
 | `wordvault_capture_clipboard` | 请求助手立刻抓一次剪贴板 |
-| `wordvault_fix_last` | 撤销最近一次录入 / 改到另一个用户库 |
+| `wordvault_fix_last` | 撤销最近一次录入 / 改到另一个用户库 |`r`n| `wordvault_make_cards` | 生成记忆卡内容(拆词 + 荒诞梗),可只重做指定词 |`r`n| `wordvault_export_cards` | 出记忆卡 HTML / PDF / Word + 首页预览 |`r`n| `wordvault_exam_start` | 按范围出题 + 起本地答题页(可顺带出打印卷) |`r`n| `wordvault_exam_answer` | 手工录分(批改打印卷/对话答题) |`r`n| `wordvault_exam_result` | 考试结算与错题清单 |`r`n| `wordvault_exam_paper` | 导出可打印试卷 + 参考答案 |
 
 ## 4. 记忆卡输出（P2）
 
@@ -118,7 +118,64 @@ Ctrl+C 复制英文
 
 `cards(user_id, word_id, term, phonetic, pos, meaning, segs(JSON), story, model, source, created_at, updated_at)`，`UNIQUE(user_id, word_id)`。`wordvault_query` / `wordvault_status` 会带出卡片状态（`cardStats`: total / withCard / withoutCard / stale）。
 
-## 5. 数据模型（node:sqlite）
+## 5. 考试闭环（P3）
+
+英译汉单选题 + 即时判分 + 掌握度自动维护。
+
+### 题干形式（按用户要求）
+
+题干是**包含该词的英文句子**，再单独问这个词在句中的意思：
+
+```
+Nice to meet you, Jenny.   句中的 meet 是什么意思？
+A. 遇见     B. 错过     C. 送别     D. 邀请
+```
+
+句子来源：**优先用你录词时复制下来的那句原文**（存在 `events.context`），没有原文才让模型写一句（≤12 词、校园/家庭/食堂场景）。所以孩子们考到的正是他们真实读到过的句子。
+
+### 三条硬规则（代码侧都校验）
+
+1. **答案位置错开**：按位置配额分配（20 题 → A/B/C/D 各 5 次），并打散"连续 3 题同一位置"。答案存库，**答题页拿不到答案**，判分只在服务端做。
+2. **干扰项要有迷惑性**：同词性 + 同语义场；**优先从你自己库里同词性的其他词义取（最多 2 个）**——那正是孩子正在背的词，天然像"对的"；不足由模型补齐，库内还不够再用其它词义兜底。
+3. **选项唯一性**：不能与正确答案撞义（含"马铃薯;土豆" vs "土豆"这种多义项/子串情况），干扰项之间也不能重复；展示层每个选项最多留 2 个义项（避免正确答案比干扰项长一截被一眼认出）。
+
+### 答题（本地网页）
+
+`wordvault_exam_start` 出题后，插件在 **127.0.0.1 上起一个临时服务**并给出带随机 token 的链接：
+
+- 浏览器打开 → 逐题作答 → **点选即判分**，立刻显示对错、正确答案、以及"连续答对 N/3"
+- 连对 3 次当场提示 🎉已学会；答错且原本已学会 → 提示"已摘牌，需要重新连对 3 次"
+- 交卷出成绩页（对了几题、正确率、错题清单）
+- 服务只监听本机、URL 带随机 token、空闲超时（默认 30 分钟）自动关闭；插件卸载时一并关闭
+
+### 掌握度口径（唯一实现于 `answerExamQuestion`）
+
+| 情况 | 处理 |
+|---|---|
+| 答对 | `streak + 1`；`streak >= 3` → 打「已学会」（记 `mastered_at`） |
+| 答错 | `streak = 0`；若原本已学会 → **摘牌**回 learning，`wrong_count + 1` |
+| 已学会词 | 默认按 `recheckRatio`（10%）混入后续考试做复查；也可用 `status=mastered` 出专项复查卷 |
+
+### 工具
+
+| 工具 | 用途 |
+|---|---|
+| `wordvault_exam_start` | 按范围出题 + 起答题页（可选顺带导出打印卷），返回链接、答案位置分布、候选池 |
+| `wordvault_exam_answer` | 手工录分（批改打印卷／对话里答题），choice 传 `A/B/C/D` 或 0-3 |
+| `wordvault_exam_result` | 结算：对了几题、错题清单（你选了什么/正确是什么）、答案位置分布 |
+| `wordvault_exam_paper` | 导出可打印试卷 + 参考答案（拆成两个文件：试卷给人做，答案自己留） |
+
+### 出题前自动补翻译
+
+英译汉必须有释义：范围内缺释义的词会**先自动补翻译**（走词典缓存，只翻缺的），不需要手动处理。
+
+### 落库
+
+- `exam_sessions(user_id, scope, size, correct, created_at, finished_at, status, token)`
+- `exam_questions(session_id, seq, word_id, prompt_word, sentence, sentence_src, correct_meaning, options(JSON), answer_index, chosen_index, is_correct, is_recheck, answered_at)`
+- `exam_answers(...)`：每题的不可变答题流水，便于日后分析
+
+## 6. 数据模型（node:sqlite）
 
 ```
 users(id,name,enabled,created_at)
@@ -135,7 +192,7 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 - **撤销**：删掉该次 `capture_id` 的 events，受影响词条按剩余 events 重算；不再有任何 event 的词条整条删除（即"这次新建的"）。
 - **可重建性**：`words` 是 `events` 的投影，`rebuildCounters()` 可全量重算。
 
-## 6. 配置（settings 命名空间 `dsh-word-vault`）
+## 7. 配置（settings 命名空间 `dsh-word-vault`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -159,8 +216,14 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 | `keepPhrases` | true | 2~5 词短文本另存一条「词组」 |
 | `maxWordsPerCapture` | 30 | 单次录入最多收多少词 |
 | `extraStopwords` | [] | 追加停用词 |
+| `cardsTitle` / `cardsSubtitle` | 趣味单词记忆卡 / （空=自动） | 记忆卡页眉文案 |
+| `cardsBatchSize` | 8 | 记忆卡内容每次交给模型几个词 |
+| **`examCount`** | **10** | 默认出多少题 |
+| **`examRecheckRatio`** | **0.1** | 已学会词混入复查的比例（答错自动摘牌） |
+| **`examMinutes`** | **30** | 答题页空闲多久自动关闭（分钟） |
+| `examBatchSize` | 6 | 出题时每次交给模型几个词 |
 
-## 7. 安装与重载
+## 8. 安装与重载
 
 ```powershell
 dsh plugin --profile web add D:/workout/deepseekharness/dsh-plugin/dsh-word-vault
@@ -174,12 +237,12 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 - 助手脚本改动（`scripts/capture.ps1`）：重启 DSH 会重新拉起助手即可生效。
 - 依赖：`@deepseek-ai/dsh-tools` 与 `dsh-llm` 声明为 **peerDependencies**（宿主共享包，避免插件市场"遮蔽宿主版本"告警），本机同时在 `devDependencies` 里保留，供 `npm install` 装进插件自己的 `node_modules`（link 安装不会替插件装依赖）。
 
-## 8. 测试
+## 9. 测试
 
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
-node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs
-# 57 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、`r`n#        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、`r`n#        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word
+node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs
+# 81 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、`r`n#        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、`r`n#        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、`r`n#        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
@@ -193,7 +256,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 
 助手端到端测试**不需要人工操作**：它用 `EnumChildWindows` 找到弹窗里的按钮句柄，`SendMessage(BM_CLICK)` 真点一下，再断言命令文件；视觉测试用 `CopyFromScreen` 截图后逐像素比对颜色。
 
-## 9. 实测踩坑（都已在代码/测试里处理，改代码前务必看）
+## 10. 实测踩坑（都已在代码/测试里处理，改代码前务必看）
 
 **PowerShell / 助手侧**
 1. PS 5.1 把无 BOM 的 UTF-8 `.ps1` 当 ANSI/GBK 读 → 中文字面量被撕碎、语法报错。因此 `capture.ps1` **全 ASCII 源码**，中文文案从 UTF-8 JSON 配置注入。
@@ -217,19 +280,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 15. `todayFor()` 一度把用户对象当名字查（`String(obj)` → `[object Object]`）→ "今日累计"恒为 0；已修并有回归测试。
 16. 反馈不能等慢操作：翻译曾在落库之前 → 弹窗长时间停在"处理中…"。现在先落库+写回执，再补翻译。
 
-## 10. 路线
+## 11. 路线
 
 - **P1（已完成）** 剪贴板 + 点选弹窗录入、对话录入、翻译落库、查询统计、撤销/改库
 - **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
-- **P3** 考试闭环：英译汉单选（干扰项优先取同库词义）→ 在线答题 → 判分回写 → 连续 3 次答对打「已学会」、答错清零、已学会词 10% 抽样复查
+- **P3（已完成）** 考试闭环：英译汉单选（含该词的句子 + 单独问该词；干扰项同库同词性优先）→ 本地网页答题即时判分 → 连续 3 次答对打「已学会」、答错摘牌、已学会词 10% 抽样复查 → 可打印试卷
 - **P4** 拍照通道：颜色掩码定位标记（荧光笔色块 + 红色下划线）→ 连通域聚类 → 裁剪 → 视觉模型只读印刷体 → 批量入库；判不清一律丢弃
 - **P5** 词库管理界面（浏览 / 改释义 / 删词 / 手动改标签）+ 统计（高频榜 / 最近新增 / 久未复习）
 
-## 11. 版本与回滚
+## 12. 版本与回滚
 
 本仓库（https://github.com/wangzhanchao883/dsh-word-vault）是插件的独立源码仓库，存在的意义就是**改炸了能回到已知可用状态**。
 
-- **已打标签**：`v0.1.0-p1` = P1 交付（38+17+14 全绿）；`v0.2.0-p2` = P2 交付（57 项 node 测试 + 17 项助手 + 14 项视觉全绿，记忆卡出片可用）
+- **已打标签**：`v0.1.0-p1` = P1（38+17+14 全绿）；`v0.2.0-p2` = P2（57+17+14 全绿）；`v0.3.0-p3` = P3（81 项 node + 17 助手 + 14 视觉全绿，考试闭环可用）
 - **整仓回滚到该标签**（会丢弃未提交改动，先确认或先 stash）：
   ```powershell
   cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault

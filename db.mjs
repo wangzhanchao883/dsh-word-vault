@@ -15,7 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -123,6 +123,26 @@ CREATE TABLE IF NOT EXISTS exam_answers (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_answers_word ON exam_answers(word_id, created_at);
+-- 一场考试的题目(题干句子 + 四个选项 + 答案位置)。答案存库,判分以库为准,页面改不了分。
+CREATE TABLE IF NOT EXISTS exam_questions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id    INTEGER NOT NULL REFERENCES exam_sessions(id),
+  seq           INTEGER NOT NULL,
+  word_id       INTEGER NOT NULL REFERENCES words(id),
+  prompt_word   TEXT NOT NULL,
+  sentence      TEXT NOT NULL DEFAULT '',
+  sentence_src  TEXT NOT NULL DEFAULT '',
+  correct_meaning TEXT NOT NULL,
+  options       TEXT NOT NULL DEFAULT '[]',
+  answer_index  INTEGER NOT NULL DEFAULT 0,
+  chosen_index  INTEGER,
+  is_correct    INTEGER,
+  is_recheck    INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  answered_at   TEXT,
+  UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_exam_q_session ON exam_questions(session_id, seq);
 `;
 
 /** 当前时刻(本地时区 ISO,便于直接当"录入时间"读) */
@@ -158,6 +178,10 @@ function migrate(db) {
     db.exec("ALTER TABLE events ADD COLUMN capture_id TEXT NOT NULL DEFAULT ''");
     db.exec("CREATE INDEX IF NOT EXISTS idx_events_capture ON events(capture_id)");
   }
+  const scols = db.prepare("PRAGMA table_info(exam_sessions)").all().map((c) => c.name);
+  if (!scols.includes("status")) db.exec("ALTER TABLE exam_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'open'");
+  if (!scols.includes("token")) db.exec("ALTER TABLE exam_sessions ADD COLUMN token TEXT NOT NULL DEFAULT ''");
+  if (!scols.includes("served_at")) db.exec("ALTER TABLE exam_sessions ADD COLUMN served_at TEXT");
 }
 
 export function closeDb(db) {
@@ -548,4 +572,207 @@ export function rebuildCounters(db, userId) {
     n += 1;
   }
   return { updated: n };
+}
+
+/** 该词最近的录入原文(context 里存着用户当时复制的那句) — 出题题干优先用它 */
+export function recentContexts(db, wordId, limit = 10) {
+  const n = Math.max(1, Math.min(50, Number(limit) || 10));
+  return db
+    .prepare("SELECT context, via, created_at FROM events WHERE word_id = ? AND context <> '' ORDER BY id DESC LIMIT ?")
+    .all(wordId, n);
+}
+
+/**
+ * ============================ P3 考试 ============================
+ *
+ * 掌握度唯一口径(2026-09-16 用户确认):
+ *   · 答对:streak + 1;streak >= 3 → 该词打「已学会」
+ *   · 答错:streak 归零;若原本已学会 → 摘牌回 learning
+ * 判分只在 answerExamQuestion 里发生,答案存库,答题页改不了分。
+ */
+
+export function createExamSession(db, { userId, scope = {}, count = 0, token = "" }) {
+  const at = nowIso();
+  const info = db
+    .prepare("INSERT INTO exam_sessions(user_id, scope, size, correct, created_at, status, token) VALUES(?, ?, 0, 0, ?, 'open', ?)")
+    .run(userId, JSON.stringify(scope || {}), at, token);
+  return getExamSession(db, Number(info.lastInsertRowid));
+}
+
+export function getExamSession(db, sessionId) {
+  return db.prepare("SELECT * FROM exam_sessions WHERE id = ?").get(sessionId) ?? null;
+}
+
+export function listExamSessions(db, userId, limit = 10) {
+  const n = Math.max(1, Math.min(100, Number(limit) || 10));
+  return db.prepare("SELECT * FROM exam_sessions WHERE user_id = ? ORDER BY id DESC LIMIT ?").all(userId, n);
+}
+
+export function addExamQuestion(db, {
+  sessionId, seq, wordId, promptWord, sentence = "", sentenceSrc = "",
+  correctMeaning, options = [], answerIndex = 0, isRecheck = false,
+}) {
+  const at = nowIso();
+  db.prepare(
+    `INSERT INTO exam_questions(session_id, seq, word_id, prompt_word, sentence, sentence_src,
+       correct_meaning, options, answer_index, is_recheck, created_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(sessionId, seq, wordId, promptWord, sentence, sentenceSrc, correctMeaning, JSON.stringify(options), answerIndex, isRecheck ? 1 : 0, at);
+  db.prepare("UPDATE exam_sessions SET size = size + 1 WHERE id = ?").run(sessionId);
+  return db.prepare("SELECT * FROM exam_questions WHERE session_id = ? AND seq = ?").get(sessionId, seq);
+}
+
+/** 题目(带答案,仅供服务端判分/答案页使用) */
+export function listExamQuestions(db, sessionId) {
+  return db
+    .prepare("SELECT q.*, w.lemma, w.seen_count, w.status AS word_status FROM exam_questions q JOIN words w ON w.id = q.word_id WHERE q.session_id = ? ORDER BY q.seq")
+    .all(sessionId)
+    .map(decodeQuestion);
+}
+
+/** 题目(剥掉答案,给答题页) */
+export function listExamQuestionsPublic(db, sessionId) {
+  return listExamQuestions(db, sessionId).map(({ answerIndex, correctMeaning, ...rest }) => rest);
+}
+
+function decodeQuestion(row) {
+  let options = [];
+  try {
+    options = JSON.parse(row.options || "[]");
+  } catch {
+    options = [];
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    seq: row.seq,
+    wordId: row.word_id,
+    word: row.prompt_word,
+    lemma: row.lemma,
+    sentence: row.sentence,
+    sentenceSrc: row.sentence_src,
+    correctMeaning: row.correct_meaning,
+    options,
+    answerIndex: row.answer_index,
+    chosenIndex: row.chosen_index,
+    isCorrect: row.is_correct === null ? null : !!row.is_correct,
+    isRecheck: !!row.is_recheck,
+    wordStatus: row.word_status,
+    seenCount: row.seen_count,
+  };
+}
+
+/**
+ * 判一道题:写答题状态、写答题流水、回写词的 streak/掌握状态。
+ * @returns {{ok:boolean, error?:string, isCorrect?:boolean, correctIndex?:number, correctMeaning?:string,
+ *            word?:string, streak?:number, status?:string, mastered?:boolean, demoted?:boolean}}
+ */
+export function answerExamQuestion(db, { sessionId, seq, chosenIndex }) {
+  const q = db.prepare("SELECT * FROM exam_questions WHERE session_id = ? AND seq = ?").get(sessionId, seq);
+  if (!q) return { ok: false, error: `这场考试没有第 ${seq} 题` };
+  if (q.chosen_index !== null && q.chosen_index !== undefined) {
+    return { ok: false, error: `第 ${seq} 题已经答过了(选了 ${q.chosen_index})` };
+  }
+  const at = nowIso();
+  const isCorrect = Number(chosenIndex) === Number(q.answer_index);
+  const options = (() => {
+    try {
+      return JSON.parse(q.options || "[]");
+    } catch {
+      return [];
+    }
+  })();
+  const chosenText = options[Number(chosenIndex)] ?? "";
+
+  db.prepare("UPDATE exam_questions SET chosen_index = ?, is_correct = ?, answered_at = ? WHERE id = ?")
+    .run(Number(chosenIndex), isCorrect ? 1 : 0, at, q.id);
+
+  const w = db.prepare("SELECT * FROM words WHERE id = ?").get(q.word_id);
+  let streak = w ? w.streak : 0;
+  let status = w ? w.status : "learning";
+  let mastered = false;
+  let demoted = false;
+  if (w) {
+    if (isCorrect) {
+      streak += 1;
+      if (streak >= 3 && status !== "mastered") {
+        status = "mastered";
+        mastered = true;
+      }
+      db.prepare("UPDATE words SET streak = ?, status = ?, mastered_at = ?, last_exam_at = ? WHERE id = ?")
+        .run(streak, status, status === "mastered" ? (w.mastered_at || at) : null, at, w.id);
+    } else {
+      streak = 0;
+      if (status === "mastered") {
+        status = "learning";
+        demoted = true;
+      }
+      db.prepare("UPDATE words SET streak = 0, status = ?, mastered_at = NULL, wrong_count = wrong_count + 1, last_exam_at = ? WHERE id = ?")
+        .run(status, at, w.id);
+    }
+  }
+
+  // 答题流水(不可变日志,便于日后分析)
+  db.prepare(
+    "INSERT INTO exam_answers(session_id, user_id, word_id, prompt, chosen, correct, is_recheck, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(sessionId, q.session_id ? db.prepare("SELECT user_id FROM exam_sessions WHERE id = ?").get(sessionId).user_id : null, q.word_id, q.correct_meaning, chosenText, isCorrect ? 1 : 0, q.is_recheck, at);
+
+  db.prepare("UPDATE exam_sessions SET correct = correct + ? WHERE id = ?").run(isCorrect ? 1 : 0, sessionId);
+
+  return {
+    ok: true,
+    isCorrect,
+    correctIndex: q.answer_index,
+    correctMeaning: q.correct_meaning,
+    chosenText,
+    correctText: options[q.answer_index] ?? "",
+    word: q.prompt_word,
+    streak,
+    status,
+    mastered,
+    demoted,
+  };
+}
+
+export function finishExamSession(db, sessionId) {
+  const at = nowIso();
+  db.prepare("UPDATE exam_sessions SET finished_at = ?, status = 'done' WHERE id = ?").run(at, sessionId);
+  return examSummary(db, sessionId);
+}
+
+export function examSummary(db, sessionId) {
+  const s = getExamSession(db, sessionId);
+  if (!s) return null;
+  const qs = listExamQuestions(db, sessionId);
+  const answered = qs.filter((q) => q.chosenIndex !== null);
+  return {
+    sessionId,
+    status: s.status,
+    createdAt: s.created_at,
+    finishedAt: s.finished_at,
+    scope: (() => {
+      try {
+        return JSON.parse(s.scope || "{}");
+      } catch {
+        return {};
+      }
+    })(),
+    total: qs.length,
+    answered: answered.length,
+    correct: answered.filter((q) => q.isCorrect).length,
+    accuracy: answered.length ? Math.round((answered.filter((q) => q.isCorrect).length / answered.length) * 100) : 0,
+    recheckCount: qs.filter((q) => q.isRecheck).length,
+    wrong: answered
+      .filter((q) => !q.isCorrect)
+      .map((q) => ({ seq: q.seq, word: q.word, chose: q.options[q.chosenIndex], right: q.correctMeaning, streak: 0 })),
+    masteredNow: qs.filter((q) => q.isCorrect).map((q) => q.word),
+  };
+}
+
+/** 每题答案位置分布(自检"ABCD 是否错开"用) */
+export function answerPositionSpread(db, sessionId) {
+  const qs = listExamQuestions(db, sessionId);
+  const spread = [0, 0, 0, 0];
+  for (const q of qs) spread[q.answerIndex] = (spread[q.answerIndex] || 0) + 1;
+  return { total: qs.length, spread };
 }

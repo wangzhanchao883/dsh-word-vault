@@ -75,6 +75,17 @@ export const DEFAULT_CONFIG = {
     /** 每次让模型处理多少个词(太大质量下降、太小费 token) */
     batchSize: 8,
   },
+  /** 考试 */
+  exam: {
+    /** 默认出多少题 */
+    count: 10,
+    /** 已学会词的抽查比例(答错自动摘牌) */
+    recheckRatio: 0.1,
+    /** 答题服务空闲多久自动关闭(分钟) */
+    minutes: 30,
+    /** 出题时每次交给模型几个词 */
+    batchSize: 6,
+  },
 };
 
 /** 助手浮窗与状态文案(中文放配置里,ps1 保持纯 ASCII 源码) */
@@ -131,6 +142,7 @@ export function resolveConfig(input = {}) {
   const helperSrc = src.helper && typeof src.helper === "object" ? src.helper : {};
   const wordsSrc = src.words && typeof src.words === "object" ? src.words : {};
   const cardsSrc = src.cards && typeof src.cards === "object" ? src.cards : {};
+  const examSrc = src.exam && typeof src.exam === "object" ? src.exam : {};
 
   const users = Array.isArray(src.users)
     ? src.users.map(normalizeUser).filter(Boolean)
@@ -176,6 +188,12 @@ export function resolveConfig(input = {}) {
       title: pickString(cardsSrc.title, DEFAULT_CONFIG.cards.title),
       subtitle: typeof cardsSrc.subtitle === "string" ? cardsSrc.subtitle.trim() : DEFAULT_CONFIG.cards.subtitle,
       batchSize: pickNumber(cardsSrc.batchSize, DEFAULT_CONFIG.cards.batchSize, 1, 20),
+    },
+    exam: {
+      count: pickNumber(examSrc.count, DEFAULT_CONFIG.exam.count, 1, 100),
+      recheckRatio: pickNumber(examSrc.recheckRatio, DEFAULT_CONFIG.exam.recheckRatio, 0, 1),
+      minutes: pickNumber(examSrc.minutes, DEFAULT_CONFIG.exam.minutes, 1, 600),
+      batchSize: pickNumber(examSrc.batchSize, DEFAULT_CONFIG.exam.batchSize, 1, 12),
     },
   };
 }

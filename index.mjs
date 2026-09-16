@@ -31,10 +31,25 @@ import {
   upsertCard,
   cardStats,
   upsertDict,
+  recentContexts,
+  createExamSession,
+  addExamQuestion,
+  listExamQuestions,
+  answerExamQuestion,
+  examSummary,
+  finishExamSession,
+  getExamSession,
+  listExamSessions,
+  answerPositionSpread,
 } from "./db.mjs";
 import { CaptureService } from "./capture.mjs";
 import { generateCards } from "./cardgen.mjs";
-import { exportCardSet } from "./cards.mjs";
+import { exportCardSet, htmlToPdf, htmlToPng, findBrowser } from "./cards.mjs";
+import { generateExam, buildPaperHtml, extractSentenceFromContext } from "./examgen.mjs";
+import { startExamServer, parseChoice, EXAM_LETTERS } from "./exam.mjs";
+import { translateWords } from "./translate.mjs";
+import { randomUUID } from "node:crypto";
+import { writeFileSync, mkdirSync } from "node:fs";
 
 export const name = "dsh-word-vault";
 export const inject = ["tools"];
@@ -79,6 +94,10 @@ const settingsSchema = z.object({
   cardsTitle: z.string().default(DEFAULT_CONFIG.cards.title),
   cardsSubtitle: z.string().default(DEFAULT_CONFIG.cards.subtitle),
   cardsBatchSize: z.number().min(1).max(20).default(DEFAULT_CONFIG.cards.batchSize),
+  examCount: z.number().min(1).max(100).default(DEFAULT_CONFIG.exam.count),
+  examRecheckRatio: z.number().min(0).max(1).default(DEFAULT_CONFIG.exam.recheckRatio),
+  examMinutes: z.number().min(1).max(600).default(DEFAULT_CONFIG.exam.minutes),
+  examBatchSize: z.number().min(1).max(12).default(DEFAULT_CONFIG.exam.batchSize),
 });
 
 /** 插件嵌套结构 → 扁平 settings 结构 */
@@ -112,6 +131,10 @@ function toFlat(config) {
     cardsTitle: config.cards.title,
     cardsSubtitle: config.cards.subtitle,
     cardsBatchSize: config.cards.batchSize,
+    examCount: config.exam.count,
+    examRecheckRatio: config.exam.recheckRatio,
+    examMinutes: config.exam.minutes,
+    examBatchSize: config.exam.batchSize,
   };
 }
 
@@ -151,6 +174,12 @@ function fromFlat(flat) {
       title: flat.cardsTitle,
       subtitle: flat.cardsSubtitle,
       batchSize: flat.cardsBatchSize,
+    },
+    exam: {
+      count: flat.examCount,
+      recheckRatio: flat.examRecheckRatio,
+      minutes: flat.examMinutes,
+      batchSize: flat.examBatchSize,
     },
   });
 }
@@ -214,11 +243,22 @@ export function apply(ctx, input = {}) {
   };
 
   // ---------------- 生命周期:注册即 effect,配置变化时重建助手 ----------------
+  /** 正在跑的答题服务(插件卸载时一并关掉,别留下孤儿监听端口) */
+  const examServers = new Set();
+
   ctx.effect(() => {
     open();
     if (liveConfig.enabled) startService();
     return () => {
       stopService();
+      for (const s of examServers) {
+        try {
+          s.close();
+        } catch {
+          /* 已关闭 */
+        }
+      }
+      examServers.clear();
       if (db) {
         closeDb(db);
         db = null;
@@ -622,6 +662,287 @@ export function apply(ctx, input = {}) {
         },
         warnings: out.warnings,
         note: "出片后请打开预览图确认:每页第 4 行的「已攻下」勾选框都在框内(内容超高会被切掉)",
+      });
+    },
+  }));
+
+  // ---------------- P3 共用:出题(句子取原文优先,干扰项同库同词性优先) ----------------
+  const buildExamFor = async (args, user, signal) => {
+    const scope = {
+      since: args.since,
+      until: args.until,
+      minCount: args.minCount,
+      maxCount: args.maxCount,
+      status: args.status,
+      orderBy: args.orderBy || "stale",
+      includeMastered: args.includeMastered !== false,
+      seed: args.seed,
+    };
+    const count = Math.max(1, Math.min(100, Number(args.count) || liveConfig.exam.count));
+
+    // 英译汉必须有释义:范围内缺释义的词先自动补翻译(走词典缓存,只翻缺的)
+    const candidates = queryWords(db, {
+      userId: user.id,
+      kind: "word",
+      since: scope.since,
+      until: scope.until,
+      minCount: scope.minCount,
+      maxCount: scope.maxCount,
+      status: scope.status && scope.status !== "all" ? scope.status : undefined,
+      orderBy: scope.orderBy,
+      limit: 2000,
+    });
+    const missing = candidates.filter((r) => !String(r.meaning || "").trim());
+    let translated = 0;
+    if (missing.length) {
+      const map = await translateWords({
+        llm: ctx.get("llm"),
+        provider: liveConfig.provider,
+        model: liveConfig.model,
+        words: missing.map((r) => ({ term: r.lemma })),
+        logger: ctx.logger,
+        signal,
+      });
+      if (map.size) {
+        upsertDict(
+          db,
+          [...map.entries()].map(([term, v]) => ({
+            term,
+            kind: "word",
+            phonetic: v.phonetic,
+            pos: v.pos,
+            meaning: v.meaning,
+            source: "llm-exam",
+          })),
+        );
+        translated = map.size;
+      }
+    }
+
+    const gen = await generateExam({
+      llm: ctx.get("llm"),
+      provider: liveConfig.provider,
+      model: liveConfig.model,
+      db,
+      queryWords,
+      userId: user.id,
+      scope,
+      count,
+      recheckRatio: args.recheckRatio === undefined ? liveConfig.exam.recheckRatio : Number(args.recheckRatio),
+      batchSize: liveConfig.exam.batchSize,
+      logger: ctx.logger,
+      signal,
+      findSentence: (row) => {
+        for (const c of recentContexts(db, row.id, 10)) {
+          const s = extractSentenceFromContext(c.context, row.lemma);
+          if (s) return s;
+        }
+        return "";
+      },
+    });
+    return { scope, count, gen, translated };
+  };
+
+  const persistExam = (user, scope, gen) => {
+    const token = randomUUID().replace(/-/g, "").slice(0, 16);
+    const session = createExamSession(db, { userId: user.id, scope: { ...scope, generated: gen.questions.length }, count: gen.questions.length, token });
+    gen.questions.forEach((q, i) => {
+      addExamQuestion(db, {
+        sessionId: session.id,
+        seq: i + 1,
+        wordId: q.wordId,
+        promptWord: q.word,
+        sentence: q.sentence,
+        sentenceSrc: q.sentenceSrc,
+        correctMeaning: q.correctMeaning,
+        options: q.options,
+        answerIndex: q.answerIndex,
+        isRecheck: q.isRecheck,
+      });
+    });
+    return getExamSession(db, session.id);
+  };
+
+  // ---------------- 工具 8:开始考试(出题 + 起本地答题页) ----------------
+  ctx.tools.register(textTool({
+    name: "wordvault_exam_start",
+    description:
+      "按范围出一份英译汉单选题并起本地答题页:题干是含该词的英文句子,再单独问这个词的意思;ABCD 正确答案按位置配额均衡错开;干扰项优先取同库同词性的词义、由模型补齐。返回一个 127.0.0.1 的答题链接(浏览器打开即可逐题作答、即时判分并回写库)。可顺带导出可打印试卷。",
+    parameters: {
+      ...CARD_FILTERS,
+      count: { type: "number", description: "出多少题,缺省用设置里的 examCount" },
+      includeMastered: { type: "boolean", description: "是否混入已学会词做复查,缺省 true(比例见 examRecheckRatio)" },
+      paper: { type: "boolean", description: "同时导出可打印试卷(PDF),缺省 false" },
+      title: { type: "string", description: "卷面标题,缺省 英语单词测验" },
+      seed: { type: "number", description: "随机种子(同一种子出同一份卷,便于复现)" },
+    },
+    async execute(args, exec) {
+      open();
+      if (!liveConfig.enabled) return "插件已停用(enabled=false)。";
+      const user = findUser(db, args.user || liveConfig.defaultUser);
+      if (!user) return `没有这个用户:${args.user || liveConfig.defaultUser}`;
+
+      const { scope, gen, translated } = await buildExamFor(args, user, exec && exec.signal);
+      if (!gen.questions.length) {
+        return json({
+          ok: false,
+          message: gen.reason || "出题失败:没有可考的词",
+          failures: gen.failures,
+          pool: gen.pool,
+          autoTranslated: translated,
+          hint: "先用 wordvault_add 录词、或放宽范围(如 minCount/status);若提示'没有释义',多为翻译调用失败,可稍后重试",
+        });
+      }
+      const session = persistExam(user, scope, gen);
+      const title = String(args.title || "英语单词测验");
+      const subtitle = `${user.name} · ${gen.questions.length} 题`;
+
+      const srv = await startExamServer({
+        db,
+        sessionId: session.id,
+        title,
+        subtitle,
+        logger: ctx.logger,
+        idleTimeoutMs: liveConfig.exam.minutes * 60 * 1000,
+      });
+      if (srv.ok) examServers.add(srv);
+
+      let paper = null;
+      if (args.paper) paper = await exportExamPaper(session.id, user, title, subtitle, "pdf");
+
+      const spread = answerPositionSpread(db, session.id);
+      return json({
+        ok: true,
+        sessionId: session.id,
+        user: user.name,
+        url: srv.ok ? srv.url : null,
+        serverError: srv.ok ? undefined : srv.error,
+        questions: gen.questions.length,
+        recheck: gen.questions.filter((q) => q.isRecheck).length,
+        autoTranslated: translated,
+        answerSpread: spread.spread,
+        pool: gen.pool,
+        failedWords: gen.failures,
+        paper: paper ? paper.files : undefined,
+        note: srv.ok
+          ? "把这个链接发给答题的人(浏览器打开);逐题点选即判分,最后自动结算。链接含随机 token 且只监听本机。"
+          : "答题服务没能起来,可用 wordvault_exam_paper 导试卷、再用 wordvault_exam_answer 手工录分。",
+      });
+    },
+  }));
+
+  // ---------------- 工具 9:手工录分/答题(打印卷与对话场景) ----------------
+  ctx.tools.register(textTool({
+    name: "wordvault_exam_answer",
+    description:
+      "为某场考试的第 N 题记录作答并判分(choice 传 A/B/C/D 或 0-3)。用于批改打印卷、或在对话里答题。判分会按口径回写该词的连续答对次数与已学会状态。",
+    parameters: {
+      sessionId: { type: "number", description: "考试 id(由 wordvault_exam_start 返回)" },
+      seq: { type: "number", description: "第几题(从 1 开始)" },
+      choice: { type: "string", description: "选了哪个:A/B/C/D 或 0-3" },
+    },
+    async execute(args) {
+      open();
+      const sessionId = Number(args.sessionId);
+      const seq = Number(args.seq);
+      const choice = parseChoice(args.choice);
+      if (!Number.isFinite(sessionId) || !Number.isFinite(seq)) return "需要 sessionId 与 seq。";
+      if (choice < 0) return "choice 必须是 A/B/C/D 或 0-3。";
+      const r = answerExamQuestion(db, { sessionId, seq, chosenIndex: choice });
+      if (!r.ok) return r.error;
+      const s = examSummary(db, sessionId);
+      return json({
+        ...r,
+        chosenLetter: EXAM_LETTERS[choice],
+        correctLetter: EXAM_LETTERS[r.correctIndex],
+        progress: { answered: s.answered, total: s.total, correct: s.correct },
+        next: s.answered < s.total ? `下一题请回答第 ${s.answered + 1} 题` : "全部答完,可调 wordvault_exam_result 看结算",
+      });
+    },
+  }));
+
+  // ---------------- 工具 10:考试结算 ----------------
+  ctx.tools.register(textTool({
+    name: "wordvault_exam_result",
+    description: "查看某场考试的结算:对了几题、错题清单(你选了什么/正确是什么)、已学会变动。缺省看最近一场。",
+    parameters: {
+      sessionId: { type: "number", description: "考试 id,缺省最近一场" },
+      user: { type: "string", description: "配合缺省使用时指定用户" },
+    },
+    async execute(args) {
+      open();
+      let sessionId = Number(args.sessionId);
+      if (!Number.isFinite(sessionId)) {
+        const user = findUser(db, args.user || liveConfig.defaultUser);
+        if (!user) return `没有这个用户:${args.user || liveConfig.defaultUser}`;
+        const last = listExamSessions(db, user.id, 1)[0];
+        if (!last) return "还没有考试记录。";
+        sessionId = last.id;
+      }
+      const s = examSummary(db, sessionId);
+      if (!s) return `没有这场考试:${sessionId}`;
+      const spread = answerPositionSpread(db, sessionId);
+      return json({ ...s, answerSpread: spread.spread });
+    },
+  }));
+
+  // ---------------- 工具 11:导出/重出可打印试卷 ----------------
+  const exportExamPaper = async (sessionId, user, title, subtitle, format = "pdf") => {
+    const session = getExamSession(db, sessionId);
+    if (!session) return { ok: false, error: `没有这场考试:${sessionId}` };
+    const questions = listExamQuestions(db, sessionId);
+    const outDir = liveConfig.outputDir;
+    mkdirSync(outDir, { recursive: true });
+    const stem = `单词测验-${new Date().toISOString().slice(5, 10)}-${sessionId}`;
+    const paperPath = join(outDir, `${stem}_试卷.html`);
+    const keyPath = join(outDir, `${stem}_答案.html`);
+    writeFileSync(paperPath, buildPaperHtml({ sessionId, title, subtitle, questions, includeAnswers: false }), "utf8");
+    writeFileSync(keyPath, buildPaperHtml({ sessionId, title: `${title} · 参考答案`, subtitle, questions, includeAnswers: true }), "utf8");
+
+    const files = { paperHtml: paperPath, keyHtml: keyPath };
+    if (format === "pdf" && findBrowser()) {
+      const p1 = await htmlToPdf(paperPath, join(outDir, `${stem}_试卷.pdf`));
+      const p2 = await htmlToPdf(keyPath, join(outDir, `${stem}_答案.pdf`));
+      if (p1.ok) files.paperPdf = p1.path;
+      if (p2.ok) files.keyPdf = p2.path;
+      const png = await htmlToPng(paperPath, join(outDir, `${stem}_试卷_预览.png`));
+      if (png.ok) files.preview = png.path;
+    }
+    return { ok: true, files, questions: questions.length };
+  };
+
+  ctx.tools.register(textTool({
+    name: "wordvault_exam_paper",
+    description:
+      "把某场考试导成可打印试卷(HTML/PDF + 单独一份参考答案),用于纸笔作答,之后用 wordvault_exam_answer 录分。缺省导出最近一场;也可指定 sessionId。",
+    parameters: {
+      sessionId: { type: "number", description: "考试 id,缺省最近一场" },
+      user: { type: "string", description: "配合缺省使用时指定用户" },
+      format: { type: "string", enum: ["pdf", "html"], description: "缺省 pdf(同时给 HTML)" },
+      title: { type: "string", description: "卷面标题" },
+    },
+    async execute(args) {
+      open();
+      let sessionId = Number(args.sessionId);
+      let user = findUser(db, args.user || liveConfig.defaultUser);
+      if (!Number.isFinite(sessionId)) {
+        if (!user) return `没有这个用户:${args.user || liveConfig.defaultUser}`;
+        const last = listExamSessions(db, user.id, 1)[0];
+        if (!last) return "还没有考试记录,先用 wordvault_exam_start 出一份。";
+        sessionId = last.id;
+      }
+      const session = getExamSession(db, sessionId);
+      if (!session) return `没有这场考试:${sessionId}`;
+      if (!user) user = { name: `用户${session.user_id}` };
+      const title = String(args.title || "英语单词测验");
+      const r = await exportExamPaper(sessionId, user, title, `${user.name} · ${listExamQuestions(db, sessionId).length} 题`, String(args.format || "pdf"));
+      if (!r.ok) return r.error;
+      return json({
+        ok: true,
+        sessionId,
+        questions: r.questions,
+        files: r.files,
+        note: "试卷与答案分开两个文件:打印试卷给人做,答案自己留着;做完用 wordvault_exam_answer 逐题录分会自动回写掌握度",
       });
     },
   }));

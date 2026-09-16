@@ -17,6 +17,8 @@
     "translate.mjs",
     "cards.mjs",
     "cardgen.mjs",
+    "examgen.mjs",
+    "exam.mjs",
     "capture.mjs",
     "cordis.patch.yml",
     "scripts/capture.ps1",
