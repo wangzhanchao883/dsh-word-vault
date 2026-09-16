@@ -301,8 +301,10 @@ export function apply(ctx, input = {}) {
   });
 
   // ---------------- 设置命名空间:等 settings 服务就绪后注册 ----------------
+  let settingsService = null; // 页面写设置要用(宿主 settings 服务的 update)
   ctx.inject(["settings"], (settingsCtx) => {
     try {
+      settingsService = settingsCtx.settings;
       const scope = settingsCtx.settings.register(SETTINGS_NS, settingsSchema, { base: toFlat(liveConfig) });
       const resolved = scope.get();
       if (resolved) liveConfig = fromFlat(resolved);
@@ -328,6 +330,13 @@ export function apply(ctx, input = {}) {
     cardStats,
     liveConfig,
     logger: ctx.logger,
+    /** 页面读设置:与 DSH 原生设置页同一份(扁平结构) */
+    getSettings: () => toFlat(liveConfig),
+    /** 页面写设置:走宿主 settings 服务的 update(只合并 patch 到用户分节) */
+    writeSettings: async (patch) => {
+      if (!settingsService) throw new Error("设置服务不可用");
+      return settingsService.update(SETTINGS_NS, patch);
+    },
     actions: {
       /** 按页面筛选出记忆卡(缺卡片的先补生成) */
       cards: async ({ user, status, minCount, words, orderBy, limit }) => {

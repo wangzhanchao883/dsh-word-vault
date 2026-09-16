@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildLibraryPayload, buildLibraryPageHtml, registerWebUi, resolveScope, WEB_PATH, GROUP_LABELS } from "../web.mjs";
+import { buildLibraryPayload, buildLibraryPageHtml, buildHelpPageHtml, buildSettingsPageHtml, registerWebUi, resolveScope, SETTINGS_SPEC, WEB_PATH, GROUP_LABELS } from "../web.mjs";
 import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, upsertCard, createExamSession, addExamQuestion, answerExamQuestion } from "../db.mjs";
 
 function setup() {
@@ -253,11 +253,15 @@ async function mountRoute(db, actions = {}, cfg = {}) {
       cb({ webServer: { register: (r) => { route = r; return () => {}; } } });
     },
   };
+  // cfg 里的 getSettings/writeSettings 是 registerWebUi 的顶层依赖,其余是 liveConfig 的覆盖项
+  const { getSettings, writeSettings, ...liveCfg } = cfg;
   registerWebUi(ctx, {
     db, queryWords, stats, cardStats,
-    liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 }, ...cfg },
+    liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 }, ...liveCfg },
     logger: ctx.logger,
     actions,
+    getSettings,
+    writeSettings,
   });
   assert.ok(route, "路由应已注册");
   const srv = createServer((req, res) => route.handler(req, res));
@@ -454,6 +458,86 @@ test("页面按钮:在线答题 / 打印试卷 PDF 两个入口,文件走 /file 
   assert.ok(!html.includes('id="actExam"'), "旧的合并按钮应删除");
   assert.ok(html.includes("/file?p="), "文件应通过 /file 路由打开,而不是只给路径");
   assert.ok(html.includes("data-open"), "应提供在系统里打开目录的入口");
+});
+
+test("P5.3 使用说明页与设置页:能打开、脚本可解析、设置可读写", async () => {
+  const s = setup();
+  const written = [];
+  let flat = { highFreqMin: 2, examCount: 10, photoDir: "X:/photos", outputDir: "X:/out", photoSatMin: 40 };
+  const r = await mountRoute(s.db, {}, {
+    getSettings: () => flat,
+    writeSettings: async (patch) => {
+      written.push(patch);
+      flat = { ...flat, ...patch };
+    },
+  });
+  try {
+    const help = await r.get("/help");
+    assert.equal(help.status, 200);
+    assert.match(help.text, /使用说明/);
+    assert.match(help.text, /高频易错/);
+    assert.match(help.text, /在线答题/);
+    assert.match(help.text, /打印试卷 PDF/);
+    assert.match(help.text, /word-vault\/settings/);
+
+    const setPage = await r.get("/settings");
+    assert.equal(setPage.status, 200);
+    assert.match(setPage.text, /高频词门槛/);
+    assert.match(setPage.text, /photoSatMin/);
+    const script = (setPage.text.match(/<script>([\s\S]*?)<\/script>/) || [])[1];
+    assert.ok(script, "设置页应有内联脚本");
+    assert.doesNotThrow(() => new Function(script), "设置页脚本语法错误");
+    assert.equal((script.match(/{/g) || []).length, (script.match(/}/g) || []).length, "设置页脚本大括号应配平");
+
+    const got = await r.get("/api/settings");
+    assert.equal(got.status, 200);
+    const data = JSON.parse(got.text);
+    assert.equal(data.ok, true);
+    assert.equal(data.values.highFreqMin, 2);
+    assert.ok(Array.isArray(data.spec) && data.spec.length >= 15, "应带字段说明表");
+    assert.ok(data.spec.every((x) => x.key && x.group && x.label));
+
+    const ok = await r.post("/api/settings", { patch: { highFreqMin: 3, examCount: 12 } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.deepEqual(written[0], { highFreqMin: 3, examCount: 12 });
+    assert.equal(ok.data.values.highFreqMin, 3);
+    assert.match(ok.data.note, /自动重启助手/);
+    assert.equal((await r.post("/api/settings", { patch: {} })).status, 400);
+    const unknown = await r.post("/api/settings", { patch: { notAField: 1 } });
+    assert.equal(unknown.status, 400);
+    assert.match(unknown.data.error, /不认识的设置项/);
+
+    const s2 = setup();
+    const r2 = await mountRoute(s2.db, {}, {});
+    try {
+      const res = await r2.post("/api/settings", { patch: { highFreqMin: 3 } });
+      assert.equal(res.status, 501);
+      assert.match(res.data.error, /不支持写设置/);
+    } finally {
+      await r2.close();
+      closeDb(s2.db);
+      rmSync(s2.dir, { recursive: true, force: true });
+    }
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test("导航:三个页面互相可达且各自高亮", () => {
+  const lib = buildLibraryPageHtml({ userName: "用户1", highFreqMin: 2 });
+  const help = buildHelpPageHtml({ highFreqMin: 2 });
+  const set = buildSettingsPageHtml();
+  for (const html of [lib, help, set]) {
+    assert.ok(html.includes('class="nav"'), "应有导航条");
+    assert.ok(html.includes(`${WEB_PATH}/help`), "导航应链接到使用说明");
+    assert.ok(html.includes(`${WEB_PATH}/settings`), "导航应链接到设置");
+  }
+  assert.match(lib, /navlink on"[^>]*href="\/word-vault"/, "库页应高亮「词库」");
+  assert.match(help, /navlink on"[^>]*href="\/word-vault\/help"/, "说明页应高亮「使用说明」");
+  assert.match(set, /navlink on"[^>]*href="\/word-vault\/settings"/, "设置页应高亮「设置」");
+  assert.ok(SETTINGS_SPEC.some((x) => x.key === "highFreqMin"));
 });
 
 test("registerWebUi:没有 webServer 服务时静默跳过(不影响 headless)", () => {

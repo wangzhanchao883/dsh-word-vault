@@ -188,8 +188,9 @@ td.mean { white-space:normal; min-width:180px; }
 .note b { color:var(--blue); }
 .err { background:#fdeaea; border-color:#e0b4b4; color:#8b2f2f; }
 .tag { font-size:11px; color:var(--gray); }
-</style></head><body><div class="wrap">
+${NAV_CSS}</style></head><body><div class="wrap">
 <h1>英语生词库 · 总览<small>用户 ${escapeHtml(userName)} · 高频门槛 标记 ≥${highFreqMin} 次 · P5.1 只读版</small></h1>
+${nav("/")}
 <div class="cards" id="kpis"></div>
 <div class="bar">
   <span id="tabs"></span>
@@ -519,7 +520,7 @@ export function resolveScope({ group = "all", q = "", highFreqMin = 2, sort = "c
  *          actions?:{cards?:Function, exam?:Function}}} deps
  * @returns {boolean} 是否已注册(服务可用)
  */
-export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger, actions = {} }) {
+export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger, actions = {}, getSettings, writeSettings }) {
   let registered = false;
   ctx.inject(["webServer"], (webCtx) => {
     const send = (res, code, body, type = "application/json; charset=utf-8") => {
@@ -566,6 +567,18 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
       // ---------------- 读 ----------------
       if (!isWrite && (sub === "/" || sub === "")) {
         send(res, 200, buildLibraryPageHtml({ userName: liveConfig.defaultUser, highFreqMin: liveConfig.highFreqMin }), "text/html; charset=utf-8");
+        return;
+      }
+      if (!isWrite && sub === "/help") {
+        send(res, 200, buildHelpPageHtml({ highFreqMin: liveConfig.highFreqMin }), "text/html; charset=utf-8");
+        return;
+      }
+      if (!isWrite && sub === "/settings") {
+        send(res, 200, buildSettingsPageHtml(), "text/html; charset=utf-8");
+        return;
+      }
+      if (!isWrite && sub === "/api/settings") {
+        send(res, 200, { ok: true, spec: SETTINGS_SPEC, values: typeof getSettings === "function" ? getSettings() : {} });
         return;
       }
       // 把生成的文件直接从页面打开(否则用户得自己去路径里翻) —— 限定在允许的目录内
@@ -659,6 +672,36 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
         }
         if (logger) logger.info(`dsh-word-vault: 页面手动标记 ${lemma} -> ${r.status}`);
         send(res, 200, { ok: true, word: r.term, status: r.status });
+        return;
+      }
+      if (sub === "/api/settings") {
+        if (typeof writeSettings !== "function") {
+          send(res, 501, { ok: false, error: "当前环境不支持写设置（设置服务不可用），请到 DSH 原生设置页修改" });
+          return;
+        }
+        const patch = body && typeof body.patch === "object" && body.patch ? body.patch : {};
+        const keys = Object.keys(patch);
+        if (!keys.length) {
+          send(res, 400, { ok: false, error: "patch 为空" });
+          return;
+        }
+        const allowed = new Set(SETTINGS_SPEC.map((s) => s.key));
+        const bad = keys.filter((k) => !allowed.has(k));
+        if (bad.length) {
+          send(res, 400, { ok: false, error: `不认识的设置项:${bad.join(", ")}` });
+          return;
+        }
+        try {
+          await writeSettings(patch);
+          if (logger) logger.info(`dsh-word-vault: 页面改设置 ${keys.join(", ")}`);
+          send(res, 200, {
+            ok: true,
+            values: typeof getSettings === "function" ? getSettings() : {},
+            note: "已生效；涉及常驻助手的项会自动重启助手（改完若弹窗行为异常，稍等 1~2 秒）。",
+          });
+        } catch (err) {
+          send(res, 400, { ok: false, error: `设置未通过校验或被拒绝:${err && err.message ? err.message : err}` });
+        }
         return;
       }
       if (sub === "/api/words/delete-preview") {
@@ -755,3 +798,263 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
   });
   return registered;
 }
+
+// ============================ P5.3 使用说明页 + 设置表单 ============================
+
+/** 三个页面的导航条(词库 / 使用说明 / 设置) */
+function nav(active) {
+  const items = [
+    ["/", "词库"],
+    ["/help", "使用说明"],
+    ["/settings", "设置"],
+  ];
+  return (
+    '<div class="nav">' +
+    items
+      .map(([href, label]) => `<a class="navlink${active === href ? " on" : ""}" href="${WEB_PATH}${href === "/" ? "" : href}">${label}</a>`)
+      .join("") +
+    "</div>"
+  );
+}
+
+const NAV_CSS = `
+.nav { display:flex; gap:6px; align-items:center; margin:2px 0 10px; }
+a.navlink { font-size:13px; text-decoration:none; color:#41556b; background:#fff; border:1px solid var(--line); border-radius:999px; padding:5px 14px; }
+a.navlink:hover { border-color:var(--blue); color:var(--blue); }
+a.navlink.on { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:700; }
+`;
+
+/**
+ * 设置项清单:页面上展示的字段(标签/分组/说明/范围)。
+ * 只列用户真正会改的项;值从插件当前配置读(扁平结构),写回同一份 settings schema。
+ */
+export const SETTINGS_SPEC = [
+  { key: "highFreqMin", group: "复习口径", label: "高频词门槛（被标记几次算高频）", type: "int", min: 1, max: 20, help: "累计被录入/被标记达到这个次数就算高频；「高频易错」= 高频且尚未记住。" },
+  { key: "maxWordsPerCapture", group: "录入", label: "单次录入最多收多少词", type: "int", min: 1, max: 500, help: "防止一次复制长文把词库灌满。" },
+  { key: "keepPhrases", group: "录入", label: "2~5 词短句另存为「词组」", type: "bool", help: "关掉则只收单词，不收词组条目。" },
+  { key: "autoCommit", group: "录入", label: "复制后直接入库（不弹窗点选）", type: "bool", help: "默认关：必须点选归属用户才入库。开了会把普通复制也录进来。" },
+  { key: "autoTranslate", group: "录入", label: "录入时自动翻译", type: "bool", help: "关掉则只记词形，稍后再补翻译（出卡/出卷会自动补）。" },
+  { key: "promptTimeoutMs", group: "录入", label: "弹窗等待上限（毫秒）", type: "int", min: 0, max: 300000, help: "超时自动消失且不入库；0 = 一直等。" },
+  { key: "showFloatWindow", group: "录入", label: "显示常驻监听小条", type: "bool", help: "小条可拖动并记忆位置。" },
+  { key: "cardsTitle", group: "记忆卡", label: "卡片页眉主标题", type: "text" },
+  { key: "cardsBatchSize", group: "记忆卡", label: "每次交给模型几个词做拆词", type: "int", min: 1, max: 20 },
+  { key: "examCount", group: "考试", label: "默认出多少题", type: "int", min: 1, max: 100 },
+  { key: "examRecheckRatio", group: "考试", label: "已学会词抽查比例", type: "number", min: 0, max: 1, help: "抽查答错会自动摘牌。" },
+  { key: "examMinutes", group: "考试", label: "答题页空闲多久自动关闭（分钟）", type: "int", min: 1, max: 600 },
+  { key: "photoDir", group: "照片", label: "照片目录（往里丢照片就能扫）", type: "text", help: "也可以在对话里直接发照片。" },
+  { key: "photoOutDir", group: "照片", label: "裁剪与联络图输出目录", type: "text" },
+  { key: "photoKeepCrops", group: "照片", label: "保留逐块裁剪 PNG", type: "bool", help: "关掉只留联络图，省磁盘。" },
+  { key: "photoSatMin", group: "照片", label: "标记墨迹最低饱和度", type: "int", min: 5, max: 200, help: "调低=更敏感（可能把浅色印刷也当标记），调高=更严格。" },
+  { key: "photoPadUp", group: "照片", label: "裁剪上方多留像素", type: "int", min: 0, max: 200, help: "红线在词下方，必须上扩才能把被标记的词带进来。" },
+  { key: "photoMaxPerRun", group: "照片", label: "每次最多处理几张新照片", type: "int", min: 1, max: 50 },
+];
+
+const SETTINGS_CSS = `
+.form fieldset { background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 16px 14px; margin:0 0 12px; }
+.form legend { font-size:13px; font-weight:700; color:var(--blue); padding:0 6px; }
+.frow { display:grid; grid-template-columns: 330px 240px 1fr; gap:4px 12px; align-items:center; padding:7px 0; border-bottom:1px solid #f2f7fb; }
+.frow label { font-size:13px; }
+.frow input[type=text], .frow input[type=number] { font-size:13px; padding:6px 9px; border:1px solid var(--line); border-radius:7px; width:100%; }
+.frow .fh { grid-column: 3; font-size:11px; color:var(--gray); }
+.fk { grid-column: 3; font-size:11px; color:#9fb0c0; }
+`;
+
+/** 设置页:读当前值 + 写回同一份 settings schema(写入由宿主提供的 writeSettings 完成) */
+export function buildSettingsPageHtml() {
+  const body = `
+<h1>设置<small>改完即时生效（录入相关项会自动重启常驻助手）</small></h1>
+${nav("/settings")}
+<div class="result hide" id="result"></div>
+<div id="form" class="form"><div class="meta">加载中…</div></div>
+<div class="note">
+  <b>说明</b>：这些项与 DSH 原生设置页（插件配置 · dsh-word-vault）读写的是<b>同一份</b>配置，改哪边都一样。
+  路径类字段请写绝对路径。点「保存本组」只提交你改过的字段，不会覆盖别处。
+</div>
+<div class="note">
+  <b>路径快捷入口</b>：
+  <button class="mini" data-open-placeholder="1" id="openOut">📁 打开输出目录</button>
+  <button class="mini" data-open-placeholder="1" id="openPhoto">📁 打开照片目录</button>
+</div>`;
+  const script = `
+const BASE = ${JSON.stringify(WEB_PATH)};
+const SPEC = ${JSON.stringify(SETTINGS_SPEC)};
+const GROUPS = [...new Set(SPEC.map((s) => s.group))];
+let current = {};
+let dirty = {};
+
+function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function post(path, body) {
+  const res = await fetch(BASE + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
+  if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+function showResult(html, cls) {
+  const el = document.getElementById('result');
+  el.className = 'result' + (cls ? ' ' + cls : '');
+  el.innerHTML = html;
+}
+
+function fieldHtml(s) {
+  const v = current[s.key];
+  const input = s.type === 'bool'
+    ? '<input type="checkbox" data-k="' + s.key + '"' + (v ? ' checked' : '') + '>'
+    : '<input type="' + (s.type === 'text' ? 'text' : 'number') + '" data-k="' + s.key + '" value="' + esc(v) + '"' +
+      (s.min !== undefined ? ' min="' + s.min + '"' : '') + (s.max !== undefined ? ' max="' + s.max + '"' : '') +
+      (s.type === 'number' ? ' step="0.05"' : '') + '>';
+  return '<div class="frow"><label>' + esc(s.label) + '</label>' + input +
+    (s.help ? '<div class="fh">' + esc(s.help) + '</div>' : '') +
+    '<div class="fk meta">' + esc(s.key) + '</div></div>';
+}
+
+function render() {
+  document.getElementById('form').innerHTML = GROUPS.map((g) => {
+    const rows = SPEC.filter((s) => s.group === g).map(fieldHtml).join('');
+    return '<fieldset><legend>' + esc(g) + '</legend>' + rows +
+      '<button class="btn primary" data-save="' + esc(g) + '">保存本组</button></fieldset>';
+  }).join('');
+  document.querySelectorAll('#form input[data-k]').forEach((el) => el.addEventListener('change', () => {
+    const k = el.dataset.k;
+    const spec = SPEC.find((s) => s.key === k);
+    dirty[k] = spec && spec.type === 'bool' ? el.checked
+      : (spec && (spec.type === 'int' || spec.type === 'number') ? Number(el.value) : el.value);
+  }));
+  document.querySelectorAll('button[data-save]').forEach((b) => b.addEventListener('click', () => saveGroup(b.dataset.save)));
+}
+
+async function saveGroup(group) {
+  const keys = SPEC.filter((s) => s.group === group).map((s) => s.key);
+  const patch = {};
+  for (const k of keys) if (k in dirty) patch[k] = dirty[k];
+  if (!Object.keys(patch).length) { showResult('这一组没有改动。'); return; }
+  try {
+    const r = await post('/api/settings', { patch });
+    current = r.values || current;
+    dirty = {};
+    showResult('已保存：<code>' + esc(Object.keys(patch).join(', ')) + '</code>' + (r.note ? '<br><span class="meta">' + esc(r.note) + '</span>' : ''), 'ok');
+    render();
+  } catch (e) { showResult('保存失败：' + esc(e.message), 'err'); }
+}
+
+async function openPath(p, label) {
+  if (!p) { showResult('这个路径是空的，先在下面填好并保存。', 'err'); return; }
+  try { await post('/api/open', { path: p }); showResult('已打开' + label + '：<code>' + esc(p) + '</code>', 'ok'); }
+  catch (e) { showResult('打开失败：' + esc(e.message), 'err'); }
+}
+
+(async () => {
+  try {
+    const r = await (await fetch(BASE + '/api/settings')).json();
+    current = r.values || {};
+    render();
+    document.getElementById('openOut').addEventListener('click', () => openPath(current.outputDir, '输出目录'));
+    document.getElementById('openPhoto').addEventListener('click', () => openPath(current.photoDir, '照片目录'));
+  } catch (e) { showResult('读取设置失败：' + esc(e.message), 'err'); }
+})();
+`;
+  return pageShell({ title: "设置 · 英语生词库", active: "/settings", body, script, extraCss: SETTINGS_CSS });
+}
+
+const HELP_CSS = `
+h2 { font-size:15px; margin:18px 0 8px; color:var(--blue); }
+td, th { white-space:normal; vertical-align:top; }
+ul { line-height:1.9; font-size:13px; }
+`;
+
+/** 使用说明页(静态文案,内容与实现对齐) */
+export function buildHelpPageHtml({ highFreqMin = 2 } = {}) {
+  const body = `
+<h1>使用说明<small>英语生词库 · 从录入到复习到考试</small></h1>
+${nav("/help")}
+<div class="note">
+  <b>一句话</b>：把课本/试卷上不会的英文<b>标出来</b>（复制或拍照）→ 自动入库并翻译 → 打印趣味记忆卡开始背 → 考试连对 3 次自动标记「已学会」。
+</div>
+
+<h2>① 四种录入方式</h2>
+<table>
+  <tr><th>方式</th><th>怎么做</th><th>你会看到</th></tr>
+  <tr><td><b>复制点选</b>（最常用）</td><td>在电脑上选中英文按 Ctrl+C</td><td>鼠标位置弹出小窗 → 点用户 → 显示「已录入成功 · N 词 · 今日累计」</td></tr>
+  <tr><td><b>拍照</b></td><td>拍作业/课本丢进照片目录，或直接在对话里发我</td><td>我扫描出被<b>荧光笔或红笔</b>标记的<b>印刷体</b>词 → 读图确认 → 入库（每张照片一条可整张撤销的记录）</td></tr>
+  <tr><td><b>对话录入</b></td><td>在 DSH 对话里贴一段英文，说「录进用户1」</td><td>我切词、去功能词、还原词形、翻译后入库</td></tr>
+  <tr><td><b>查缺补漏</b></td><td>在本页「全部」视图里搜索确认</td><td>看到哪些词已入库、各自标记了几次</td></tr>
+</table>
+
+<h2>② 三个视图怎么读</h2>
+<table>
+  <tr><th>视图</th><th>口径</th><th>用来干什么</th></tr>
+  <tr><td><b>已记住</b></td><td>连续答对 3 次，或你手动标了「已记住」</td><td>确认哪些不用再练</td></tr>
+  <tr><td><b>没记住</b></td><td>还没打上「已记住」</td><td>当前待复习池</td></tr>
+  <tr><td><b>高频易错</b></td><td>被标记次数 ≥ ${highFreqMin} 次 <b>且</b> 尚未记住</td><td><b>最该优先考的就是这些</b>：反复遇到却还没掌握</td></tr>
+</table>
+<p class="meta">「标记次数」= 这个词被录入/被标记过几次（同一段文字里重复出现只算一次，换个批次再出现才 +1）。列表里还有「连对」（当前连对 / 3）与「错」（考错次数），代码不替你做加权。</p>
+
+<h2>③ 三个动作按钮</h2>
+<table>
+  <tr><th>按钮</th><th>作用</th></tr>
+  <tr><td><b>出记忆卡</b></td><td>按当前筛选生成 A4 记忆卡：拆解块 + 一句荒诞梗 + 默写区；缺卡片的自动调模型补生成。每页 8 张，可直接打印。</td></tr>
+  <tr><td><b>在线答题</b></td><td>按当前筛选出题并给一个链接：点选即判分、显示正确答案与「连续答对 N/3」；连对 3 次当场打「已学会」，答错清零（已学会会被摘牌）。成绩与错题自动归档。</td></tr>
+  <tr><td><b>打印试卷 PDF</b></td><td>出打印卷（题目页 + 参考答案页），点开就能看/打印；做完在对话里让我逐题录分即可回写掌握度。</td></tr>
+</table>
+
+<h2>④ 掌握度怎么算</h2>
+<ul>
+  <li>答对：连对 +1；<b>连对 3 次 → 已学会</b>。</li>
+  <li>答错：连对清零；如果原本已学会 → <b>摘牌</b>回「没记住」。</li>
+  <li>已学会的词会按比例抽查（设置里可调），抽查答错同样摘牌。</li>
+  <li>也可以手动标「已记住 / 没记住」——孩子本来就会的词不用非考三次。</li>
+</ul>
+
+<h2>⑤ 页面上的写操作与安全</h2>
+<ul>
+  <li><b>改释义</b>：点表格里的释义单元格就地改（释义 / 词性 / 音标），改的是全局词典缓存。</li>
+  <li><b>删除</b>：勾选 → 「删除选中」→ 弹窗列出<b>每个词会连带清掉什么</b>（录入记录 / 记忆卡 / 考试题 / 作答）→ 确认才执行，<b>不可撤销</b>。</li>
+  <li><b>来源列</b>：最近一次录入的渠道与原文片段。若看到 <code>entities</code>、<code>monorepo</code>、<code>--flag</code> 这类片段，说明当时复制的不是课本内容（终端输出被当生词录进来了），勾选删掉即可。</li>
+</ul>
+
+<h2>⑥ 常见问题</h2>
+<ul>
+  <li><b>复制了没弹窗？</b>确认常驻助手在跑（设置里看「显示常驻监听小条」）；弹窗 20 秒不点会自动消失且不入库。</li>
+  <li><b>照片扫出来一堆手写？</b>我只录<b>印刷体</b>：各色荧光笔与红笔的红线/勾/圈都算标记，但手写内容一律不入库。</li>
+  <li><b>答题链接打不开？</b>答题页由 DSH 进程托管，关掉 DSH 链接就失效。</li>
+  <li><b>词库数据在哪？</b>SQLite 单文件，不在插件仓库里；回滚代码不会动你的词。</li>
+</ul>
+`;
+  return pageShell({ title: "使用说明 · 英语生词库", active: "/help", body, script: "", extraCss: HELP_CSS });
+}
+
+/** 三个页面共用的外壳 */
+function pageShell({ title, body, script, extraCss }) {
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title><style>${SHELL_CSS}${NAV_CSS}${extraCss || ""}</style></head><body><div class="wrap">
+${body}
+</div>${script ? `<script>${script}</script>` : ""}</body></html>`;
+}
+
+const SHELL_CSS = `
+:root { --blue:#1f5a94; --soft:#eef4fb; --line:#cfdbe6; --hot:#c0392b; --ok:#2f9e63; --ink:#1b2a3a; --gray:#7a8b9c; }
+* { box-sizing: border-box; }
+body { margin:0; font-family:"Microsoft YaHei","微软雅黑",sans-serif; color:var(--ink); background:#f7fafd; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 18px 60px; }
+h1 { font-size: 21px; margin: 4px 0 8px; }
+h1 small { font-size: 12px; font-weight: 400; color:var(--gray); margin-left: 10px; }
+table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; font-size:13px; margin-top:8px; }
+th, td { padding:8px 10px; border-bottom:1px solid #eaf1f7; text-align:left; vertical-align:top; white-space:nowrap; }
+th { background:var(--soft); font-size:12px; color:#41556b; }
+tr:last-child td { border-bottom:none; }
+.meta { color:var(--gray); font-size:12px; }
+.note { margin-top:14px; background:#fff; border:1px solid var(--line); border-left:3px solid var(--blue); border-radius:8px; padding:12px 14px; font-size:13px; line-height:1.85; }
+.note b { color:var(--blue); }
+.note code, td code { background:#f2f6fa; padding:1px 5px; border-radius:4px; }
+.mini { font-size:11px; padding:3px 8px; border-radius:6px; border:1px solid var(--line); background:#fff; color:#41556b; cursor:pointer; margin-right:4px; }
+.mini:hover { border-color:var(--blue); color:var(--blue); }
+.btn { font-size:13px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:var(--soft); color:var(--ink); cursor:pointer; }
+.btn.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:700; }
+.result { background:#fff; border:1px solid var(--line); border-left:3px solid var(--blue); border-radius:8px; padding:10px 14px; margin:10px 0; font-size:13px; line-height:1.8; }
+.result.ok { border-left-color:var(--ok); }
+.result.err { border-left-color:var(--hot); background:#fdeaea; }
+.result.hide { display:none; }
+.result code { background:#f2f6fa; padding:1px 5px; border-radius:4px; font-size:12px; }
+`;
+

@@ -291,10 +291,29 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 
 **页面筛选 → 查询范围**（`resolveScope`，纯函数、有单测）：`hot` = `status=learning` + `minCount=highFreqMin`；搜索词按「指定词」处理（出题侧用 `scope.includeWords`）；数量上限 200。
 
+### P5.3 使用说明页 + 设置表单（已完成）
+
+| 页面 | 路由 | 内容 |
+|---|---|---|
+| 词库 | `GET /word-vault` | 总览 + 写操作 + 动作（P5.1 / P5.2） |
+| **使用说明** | `GET /word-vault/help` | 四种录入方式、三个视图口径、三个动作按钮、掌握度规则、写操作与安全、常见问题 |
+| **设置** | `GET /word-vault/settings` | 18 个设置项按五组（复习口径 / 录入 / 记忆卡 / 考试 / 照片）成表单，每项带说明与配置键；「保存本组」只提交改动过的字段 |
+
+三个页面共用导航条，互相可达。
+
+**设置是真写**（不是摆设）：宿主侧用 `ctx.settings.update(ns, patch)` 把改动合并进该命名空间的**用户分节**（官方 `subsystems/settings.md` 的 owner scope 写入路径），因此：
+
+- 与 DSH 原生设置页（插件配置 · dsh-word-vault）读写**同一份**配置，不存在两套真相
+- 写入会触发本插件已有的 `scope.watch(...)` → `liveConfig` 热更新 → 需要时自动重启常驻助手（实测：改 `highFreqMin` + `photoPadUp` 后助手自动重启）
+- 页面只允许提交 `SETTINGS_SPEC` 里列出的键（防手滑写坏未知字段：未知键回 400）
+- `settings` 服务不可用时（如 headless 场景）页面读写回 501 + 可读说明，而不是静默失败
+
+**路径类字段**：设置页底部给「📁 打开输出目录 / 📁 打开照片目录」两个按钮，直接调系统默认程序打开，省得手打路径。
+
 ### 后续（未做）
 
 - **P5.2（已完成）** 写操作与动作按钮：改释义、手动掌握度、删词（含连带清理 + 影响预览 + 弹窗确认）、按当前筛选出记忆卡/出试卷/开始答题
-- **P5.3** 使用说明页 + 设置表单（输出格式、考试范围、高频阈值、照片目录）
+- **P5.3（已完成）** 使用说明页（`/help`，四种录入方式 / 视图口径 / 动作说明 / 常见问题）+ 设置表单（`/settings`，18 项五组，走宿主 settings 服务真读真写、触发助手热重启）
 - **P5.4**（可选）官方客户端半边（设置卡片），作后续增强
 
 ## 8. 数据模型（node:sqlite）
@@ -375,7 +394,7 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
 node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs
-# 120 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+# 122 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
@@ -427,8 +446,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 - **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
 - **P3（已完成）** 考试闭环：英译汉单选（含该词的句子 + 单独问该词；干扰项同库同词性优先）→ 本地网页答题即时判分 → 连续 3 次答对打「已学会」、答错摘牌、已学会词 10% 抽样复查 → 可打印试卷
 - **P4（已完成）** 拍照通道：饱和色掩码 + 形状判据定位「被标记的印刷词」→ 联络图 → 模型只读印刷体入库（真实作业照片实测 p1 22 词 / p2 23 词）
-- **P5.1（已完成）** 词库总览页：挂 DSH Web 路由 `/word-vault`，统计卡 + 四组视图（全部/已记住/没记住/高频易错）+ 搜索 + 排序 + 来源列（只读）
-- **P5.3（待做）** 使用说明与设置表单（输出格式、考试范围、高频阈值、照片目录）
+- **P5.1 / P5.2 / P5.3（已完成）** 词库界面：总览（四组视图 + 搜索排序 + 来源列）、写操作（改释义 / 手动掌握度 / 删除带影响预览）、动作（出记忆卡 / 在线答题 / 打印试卷 PDF）、使用说明页与设置表单；三个页面共用导航
+- **P5.3（已完成）** 使用说明页 + 设置表单（三个页面共用导航，设置与 DSH 原生设置页同一份配置）
 
 ## 14. 版本与回滚
 
