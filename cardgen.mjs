@@ -181,15 +181,44 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
     return parseCardOutput(raw);
   };
 
-  for (const batch of batches) {
-    let parsed = [];
-    let callError = "";
+  /**
+   * 调一次,失败了就**对半拆开**再各试一次。
+   * 为什么:实测宿主的模型调用偶发失败(超时/截断/限流),整批丢会让用户看到"卡片少了很多"
+   * 却不知道原因;拆半重试能把大部分词救回来,救不回的才记失败。
+   */
+  const askBatchResilient = async (batch) => {
     try {
-      parsed = await askOnce(batch, "");
+      return { parsed: await askOnce(batch, ""), error: "" };
     } catch (err) {
-      callError = err && err.message ? err.message : String(err);
-      if (logger) logger.warn(`dsh-word-vault: 记忆卡生成失败 - ${callError}`);
+      const msg = err && err.message ? err.message : String(err);
+      if (logger) logger.warn(`dsh-word-vault: 记忆卡批次失败(${batch.length} 词),拆半重试 - ${msg}`);
+      if (batch.length <= 1) {
+        try {
+          return { parsed: await askOnce(batch, ""), error: "" };
+        } catch (err2) {
+          return { parsed: [], error: err2 && err2.message ? err2.message : String(err2) };
+        }
+      }
+      const half = Math.ceil(batch.length / 2);
+      const parts = [batch.slice(0, half), batch.slice(half)];
+      const out = [];
+      let lastErr = msg;
+      for (const part of parts) {
+        try {
+          out.push(...(await askOnce(part, "")));
+        } catch (err2) {
+          lastErr = err2 && err2.message ? err2.message : String(err2);
+          if (logger) logger.warn(`dsh-word-vault: 记忆卡半批仍失败(${part.length} 词) - ${lastErr}`);
+        }
+      }
+      return { parsed: out, error: lastErr };
     }
+  };
+
+  for (const batch of batches) {
+    const asked = await askBatchResilient(batch);
+    const parsed = asked.parsed;
+    const callError = asked.error;
     const byWord = new Map(parsed.map((p) => [clean(p && p.word).toLowerCase(), p]));
     const bad = []; // 硬失败 或 质量不合格 → 都值得重试一次
     for (const item of batch) {
