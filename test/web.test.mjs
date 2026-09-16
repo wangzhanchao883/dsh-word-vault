@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildLibraryPayload, buildLibraryPageHtml, buildHelpPageHtml, buildSettingsPageHtml, registerWebUi, resolveScope, SETTINGS_SPEC, WEB_PATH, GROUP_LABELS } from "../web.mjs";
+import { selectionScope, buildLibraryPayload, buildLibraryPageHtml, buildHelpPageHtml, buildSettingsPageHtml, registerWebUi, resolveScope, SETTINGS_SPEC, WEB_PATH, GROUP_LABELS } from "../web.mjs";
 import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, upsertCard, createExamSession, addExamQuestion, answerExamQuestion, userOverview } from "../db.mjs";
 
 function setup() {
@@ -580,6 +580,21 @@ test("用户切换:接口带出用户库列表,可按 user 查指定库,写操�
     closeDb(s.db);
     rmSync(s.dir, { recursive: true, force: true });
   }
+});
+
+test("勾选必须原样传到动作(回归:勾了 12 个只出 1 张卡)", async () => {
+  const bad = [];
+  const scope0 = resolveScope({ group: "all", q: "", sort: "count", limit: 8 });
+  if (scope0.words !== undefined) bad.push("没勾选时不该有 words");
+  const picked = selectionScope(scope0, ["kind", "plant", "children", "potato", "share", "sit"]);
+  if (picked.words !== "kind,plant,children,potato,share,sit") bad.push("勾选要变成精确词表:" + picked.words);
+  if (picked.limit !== 8) bad.push("勾选少于 limit 时不该缩 limit");
+  const big = selectionScope(scope0, Array.from({ length: 12 }, (_, i) => "w" + i));
+  if (big.limit !== 12) bad.push("limit 必须抬到勾选数量,否则会被截断:" + big.limit);
+  if (selectionScope(scope0, []) !== scope0) bad.push("空勾选应原样返回");
+  if (selectionScope(scope0, undefined) !== scope0) bad.push("undefined 勾选应原样返回");
+  assert.deepEqual(bad, [], bad.join("; "));
+  assert.ok(true);
 });
 
 test("registerWebUi:没有 webServer 服务时静默跳过(不影响 headless)", () => {

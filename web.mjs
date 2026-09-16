@@ -533,6 +533,16 @@ function escapeHtml(v) {
  * 把页面的分组/搜索选择翻译成查询范围(纯函数,便于单测)。
  * 页面上的「高频易错」= 标记次数 ≥ 阈值 且 未学会 —— 用户 2026-09-16 定的口径。
  */
+/**
+ * 把页面勾选的词合进查询范围:勾选**优先于**搜索词,并且 limit 不能截断勾选。
+ * 之前这里漏了 body.words,导致"勾了 12 个只出 1 张卡"(后端按分组自己挑词)。
+ */
+export function selectionScope(scope, picked) {
+  const list = Array.isArray(picked) ? picked.map((w) => String(w).trim()).filter(Boolean) : [];
+  if (!list.length) return scope;
+  return { ...scope, words: list.join(","), limit: Math.max(scope.limit || 8, list.length) };
+}
+
 export function resolveScope({ group = "all", q = "", highFreqMin = 2, sort = "count", limit = 8 } = {}) {
   const scope = { orderBy: sort === "alpha" ? "alpha" : sort === "recent" ? "recent" : "count" };
   if (group === "mastered") scope.status = "mastered";
@@ -804,7 +814,8 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
           send(res, 501, { ok: false, error: "当前环境不支持出卡(缺少动作实现)" });
           return;
         }
-        const scope = resolveScope({ group: body.group, q: body.q, sort: body.sort, limit: body.limit, highFreqMin: liveConfig.highFreqMin });
+        const scope = selectionScope(resolveScope({ group: body.group, q: body.q, sort: body.sort, limit: body.limit, highFreqMin: liveConfig.highFreqMin }), body.words);
+
         const r = await actions.cards({ user, ...scope });
         send(res, r && r.ok ? 200 : 400, r || { ok: false, error: "出卡失败" });
         return;
@@ -814,10 +825,10 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
           send(res, 501, { ok: false, error: "当前环境不支持出卷(缺少动作实现)" });
           return;
         }
-        const scope = resolveScope({
+        const scope = selectionScope(resolveScope({
           group: body.group, q: body.q, sort: "count",
           limit: body.count || liveConfig.exam.count, highFreqMin: liveConfig.highFreqMin,
-        });
+        }), body.words);
         const r = await actions.exam({ user, ...scope, mode: body.mode === "answer" ? "answer" : "paper" });
         send(res, r && r.ok ? 200 : 400, r || { ok: false, error: "出卷失败" });
         return;
