@@ -122,6 +122,10 @@ export const UI_TEXT = {
   promptEmpty: "没识别到英文生词",
   promptMore: "…等 {0} 词",
   ignoreLabel: "忽略",
+  /** 成功反馈窗口的按钮:点它只是关掉窗口(词已经入库了) */
+  okLabel: "OK",
+  /** 弹窗里"词 — 中文意思"的分隔 */
+  lineSep: " — ",
   pending: "处理中…",
   // 结果反馈
   okTitle: "✔ 已录入成功",

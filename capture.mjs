@@ -232,11 +232,12 @@ export class CaptureService {
       await this.ingest(text, { user, via: evt.via || "clipboard", ts: evt.ts, kind: "auto" });
       return;
     }
-    this.promptForPick(text, evt.via || "clipboard");
+    await this.promptForPick(text, evt.via || "clipboard");
   }
 
-  /** 切词后写提示文件,等用户在弹窗里点选归属(不落库) */
-  promptForPick(text, via) {
+  /** 切词后写提示文件,等用户在弹窗里点选归属(不落库)。
+   *  用户要求:弹窗里要能看见**中文意思**,所以先补翻译(只翻缺的,通常 1~2 秒)再弹。 */
+  async promptForPick(text, via) {
     const cfg = this.config;
     const extracted = extractCandidates(text, {
       extraStopwords: new Set(cfg.words.extraStopwords || []),
@@ -253,10 +254,19 @@ export class CaptureService {
     for (const [k, v] of this.pending) if (now - v.at > ttl) this.pending.delete(k);
     if (all.length) this.pending.set(id, { text, at: now, wordCount: all.length, via });
 
+    // 先补翻译,让弹窗能显示"词 — 中文意思"
+    if (all.length) {
+      try {
+        await this.translateMissing(all.map((w) => ({ term: w, lemma: w })));
+      } catch (err) {
+        this.logger.warn(`dsh-word-vault: 弹窗前翻译失败(仍然弹窗) - ${err && err.message ? err.message : err}`);
+      }
+    }
+    const lines = all.map((w) => ({ word: w, meaning: this.meaningOf(w) || "" }));
     try {
       writeFileSync(
         this.promptPath,
-        JSON.stringify({ id, at: new Date().toISOString(), wordCount: all.length, words: all, preview: text.slice(0, 200), via }),
+        JSON.stringify({ id, at: new Date().toISOString(), wordCount: all.length, words: all, lines, preview: text.slice(0, 200), via }),
         "utf8",
       );
     } catch (err) {

@@ -450,6 +450,7 @@ function Build-Dialog {
 
     $ig = New-Object System.Windows.Forms.Button
     $ig.Text = [string]$ui.ignoreLabel
+    # switch button label on state change (pick=ignore / result=OK)
     $ig.Tag = 'ignore'
     $ig.Left = $x; $ig.Top = 94; $ig.Width = $btnW; $ig.Height = 28
     $ig.FlatStyle = 'Flat'
@@ -478,13 +479,31 @@ function Build-Dialog {
 
 function Show-PromptDialog($prompt) {
     if (-not $script:dlg) { return }
+    # pick state: the secondary button means "ignore"
+    if ($script:applyBtn) { $script:applyBtn.Text = [string]$ui.ignoreLabel }
     $id = [string]$prompt.id
     $wc = 0
     if ($null -ne $prompt.wordCount) { $wc = [int]$prompt.wordCount }
     $words = @()
     if ($prompt.words) { $words = @($prompt.words) }
-    $preview = ($words | Select-Object -First 8) -join '  '
-    if ($words.Count -gt 8) { $preview = $preview + '  ' + ($ui.promptMore -f ($words.Count - 8)) }
+    # Show the Chinese meaning in the dialog: the host writes lines=[{word,meaning}].
+    $sep = '  '
+    if ($ui.lineSep) { $sep = [string]$ui.lineSep }
+    $lineTexts = @()
+    if ($prompt.lines) {
+        foreach ($ln in @($prompt.lines)) {
+            $w = [string]$ln.word
+            $m = [string]$ln.meaning
+            if ($m) { $lineTexts += ($w + $sep + $m) } else { $lineTexts += $w }
+        }
+    }
+    if ($lineTexts.Count -gt 0) {
+        $preview = ($lineTexts | Select-Object -First 6) -join '   '
+        if ($lineTexts.Count -gt 6) { $preview = $preview + '  ' + ($ui.promptMore -f ($lineTexts.Count - 6)) }
+    } else {
+        $preview = ($words | Select-Object -First 8) -join '  '
+        if ($words.Count -gt 8) { $preview = $preview + '  ' + ($ui.promptMore -f ($words.Count - 8)) }
+    }
     if (-not $preview) { $preview = [string]$ui.promptEmpty }
 
     $script:dlgTitleText = ($ui.promptTitle -f $wc)
@@ -526,6 +545,10 @@ function Show-ResultInDialog($res) {
     }
     $script:dlgTitle.ForeColor = $CLR.black
     foreach ($k in $script:dlgButtons.Keys) { $script:dlgButtons[$k].Visible = $false }
+    # result state: the word is already saved -> the button just closes the window, label it OK
+    $okText = 'OK'
+    if ($ui.okLabel) { $okText = [string]$ui.okLabel }
+    if ($script:applyBtn) { $script:applyBtn.Text = $okText }
     $script:resultShownAt = Get-Date
     if (-not $script:dlgVisible) {
         Place-NearCursor $script:dlg
