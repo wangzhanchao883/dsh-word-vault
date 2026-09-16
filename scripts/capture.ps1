@@ -450,6 +450,7 @@ function Build-Dialog {
 
     $ig = New-Object System.Windows.Forms.Button
     $ig.Text = [string]$ui.ignoreLabel
+    $script:applyBtn = $ig   # keep a script-scope handle so state changes can relabel it
     # switch button label on state change (pick=ignore / result=OK)
     $ig.Tag = 'ignore'
     $ig.Left = $x; $ig.Top = 94; $ig.Width = $btnW; $ig.Height = 28

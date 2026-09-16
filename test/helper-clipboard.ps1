@@ -180,12 +180,16 @@ if ($cmds.Count -ge 1) {
 $resObj = [ordered]@{ at = (Get-Date).ToString('s'); ok = $true; message = '4 word(s) -> user1'
     todayCount = 12; user = 'user1'; kind = 'commit'; id = 'p-test-1' }
 ($resObj | ConvertTo-Json -Compress) | Set-Content -LiteralPath $result -Encoding UTF8
+
 $switched = Wait-For { $s = Status; $s -and $s.dialog -and ([string]$s.dialog.title) -like 'OK*' }
 $st = Status
 Verdict 'T3b dialog shows success' $switched ("title=" + [string]$st.dialog.title)
 Verdict 'T3b today total taken from host' ([int]$st.todayCount -eq 12) ("today=" + $st.todayCount)
 $hidden = Wait-For { $s = Status; $s -and $s.dialog -and $s.dialog.visible -eq $false } 5000
 Verdict 'T3b dialog auto-hides after result' $hidden ("visible=" + (Status).dialog.visible)
+    # result state: the secondary button must read OK, not ignore
+    $clickedOk = [Win]::ClickButton('word-vault-picker', 'OK')
+    Verdict 'result button says OK' $clickedOk 'expected OK label on the result-state button'
 
 # ---- T4 nobody clicks -> dismiss after promptTimeoutMs
 Write-Prompt 'p-test-2' @('share')
