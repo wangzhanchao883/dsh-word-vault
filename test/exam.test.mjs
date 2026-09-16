@@ -17,6 +17,9 @@ import {
   meaningVariants,
   trimMeaning,
   pickExamWords,
+  buildSentenceRepairPrompt,
+  parseSentenceRepair,
+  looksLikeSentence,
 } from "../examgen.mjs";
 import { parseChoice, buildExamPageHtml } from "../exam.mjs";
 import {
@@ -101,6 +104,37 @@ test("含词判定:屈折形式也算(meeting 含 meet)", () => {
 
 test("原文里没有该词时返回 null(交给模型写)", () => {
   assert.equal(extractSentenceFromContext("Children are playing in a yard.", "tomato"), null);
+});
+
+test("句子质量门槛:裸词/短标签不算句子(实测踩过 entities 这种)", () => {
+  assert.equal(looksLikeSentence("entities"), false);
+  assert.equal(looksLikeSentence("structure"), false);
+  assert.equal(looksLikeSentence("monorepo"), false);
+  assert.equal(looksLikeSentence("a map"), false);
+  assert.equal(looksLikeSentence("I have a map."), true);
+  // 录词时复制的是裸词 → 不能当成题干
+  assert.equal(extractSentenceFromContext("entities", "entity"), null);
+  assert.equal(extractSentenceFromContext("geometry", "geometry"), null);
+  assert.ok(extractSentenceFromContext("This is a map of China.", "map"));
+});
+
+test("选词:支持 excludeWords 排除垃圾词/专名", () => {
+  const { dir, path } = tempDb();
+  const db = openDb(path);
+  try {
+    const u = ensureUser(db, "用户1");
+    seedWords(db, u.id, [
+      { word: "map", pos: "n.", meaning: "地图" },
+      { word: "entity", pos: "n.", meaning: "实体" },
+      { word: "monorepo", pos: "n.", meaning: "单一代码库" },
+    ]);
+    const picked = pickExamWords({ db, queryWords, userId: u.id, scope: { excludeWords: "entity monorepo" }, count: 5, recheckRatio: 0 });
+    assert.deepEqual(picked.picked.map((p) => p.row.lemma), ["map"]);
+    assert.equal(picked.pool.excluded, 2);
+  } finally {
+    closeDb(db);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------- 干扰项
@@ -310,6 +344,62 @@ test("generateExam:题量/选项/位置分布/句子含词 全部达标", async 
 });
 
 // ---------------------------------------------------------------- 判分与掌握
+
+test("补句子:提示词要求原样出现该词、禁用派生词", () => {
+  const p = buildSentenceRepairPrompt(["health", "kind"]);
+  assert.match(p, /health/);
+  assert.match(p, /原样出现/);
+  assert.match(p, /health 不能写成 healthy/);
+});
+
+test("补句子解析:只收在候选名单里的词", () => {
+  const text = '```json\n[{"word":"health","sentence":"Good health comes from sleep."},{"word":"other","sentence":"Other thing."}]\n```';
+  const map = parseSentenceRepair(text, ["health"]);
+  assert.equal(map.size, 1);
+  assert.equal(map.get("health"), "Good health comes from sleep.");
+});
+
+test("出题:首轮用派生词写句子的词,会被补句子救回", async () => {
+  const { dir, path } = tempDb();
+  const db = openDb(path);
+  try {
+    const u = ensureUser(db, "用户1");
+    seedWords(db, u.id, [
+      { word: "health", pos: "n.", meaning: "健康" },
+      { word: "map", pos: "n.", meaning: "地图" },
+    ]);
+    let call = 0;
+    const llm = {
+      stream() {
+        call += 1;
+        const payload =
+          call === 1
+            ? JSON.stringify([
+                { word: "health", sentence: "Eating well keeps you healthy.", distractors: ["疾病", "疲劳"], pos: "n." },
+                { word: "map", sentence: "This is a map of China.", distractors: ["旗帜", "照片"], pos: "n." },
+              ])
+            : JSON.stringify([{ word: "health", sentence: "Good health comes from sleep.", distractors: ["疾病", "疲劳"], pos: "n." }]);
+        async function* gen() {
+          yield { type: "text-delta", index: 0, text: payload };
+          yield { type: "finish", reason: { kind: "stop" } };
+        }
+        return gen();
+      },
+    };
+    const gen = await generateExam({
+      llm, provider: "p", model: "m", db, queryWords, userId: u.id,
+      scope: { seed: 3 }, count: 2, recheckRatio: 0, batchSize: 2,
+    });
+    assert.equal(gen.questions.length, 2, JSON.stringify(gen.failures));
+    assert.equal(call, 2, "应该触发一次补句子调用");
+    const health = gen.questions.find((q) => q.word === "health");
+    assert.match(health.sentence, /health/);
+    assert.equal(health.options.length, 4);
+  } finally {
+    closeDb(db);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("掌握度:连续 3 次答对 → 已学会;再答错 → 摘牌回 learning", () => {
   const { dir, path } = tempDb();

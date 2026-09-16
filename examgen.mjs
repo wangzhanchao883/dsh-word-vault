@@ -80,22 +80,35 @@ export function cleanSentence(input) {
     .trim();
 }
 
+/**
+ * 句子质量门槛:必须像"一句话",不能只是那个词本身。
+ * 实测踩过:录词时复制的 context 可能是裸词("entities")或短标签,出成题就是
+ * "句中的 entity 是什么意思？句子:entities" 这种废题。
+ */
+export function looksLikeSentence(text, minWords = 3, minLen = 8) {
+  const s = cleanSentence(text);
+  if (s.length < minLen) return false;
+  const words = s.split(/\s+/).filter((w) => /[A-Za-z]/.test(w));
+  if (words.length < minWords) return false;
+  return true;
+}
+
 /** 从 context 里挑出一句含该词的英文句子(录词原文优先) */
 export function extractSentenceFromContext(context, word) {
   const raw = String(context || "").replace(/\s+/g, " ").trim();
   if (!raw) return null;
   const parts = raw.split(/(?<=[.!?;])\s+/).map((s) => cleanSentence(s)).filter(Boolean);
   const pool = parts.length ? parts : [cleanSentence(raw)];
-  const hits = pool.filter((s) => sentenceHasWord(s, word));
+  const hits = pool.filter((s) => sentenceHasWord(s, word) && looksLikeSentence(s));
   if (!hits.length) {
     // 退化:整段里含该词也行(取整段,别切碎),但要求不太长
     const whole = cleanSentence(raw);
-    if (sentenceHasWord(whole, word) && whole.length <= 160) return whole;
+    if (sentenceHasWord(whole, word) && looksLikeSentence(whole) && whole.length <= 160) return whole;
     return null;
   }
   // 取最短的一句(通常是词表/短句),但至少要有一定长度
   hits.sort((a, b) => a.length - b.length);
-  const pick = hits.find((s) => s.length >= 8) || hits[0];
+  const pick = hits.find((s) => s.length >= 12) || hits[0];
   return pick.length > 200 ? `${pick.slice(0, 197)}…` : pick;
 }
 
@@ -139,8 +152,15 @@ export function pickExamWords({ db, queryWords, userId, scope = {}, count = 10, 
     orderBy: scope.orderBy || "stale",
     limit: 2000,
   });
-  const learning = base.filter((r) => r.status !== "mastered");
-  const mastered = base.filter((r) => r.status === "mastered");
+  // 排除词(垃圾词/专名等):用户可点名不要考
+  const exclude = new Set(
+    (Array.isArray(scope.excludeWords) ? scope.excludeWords : String(scope.excludeWords || "").split(/[\s,，、]+/))
+      .map((w) => String(w).trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const usable = exclude.size ? base.filter((r) => !exclude.has(String(r.lemma).toLowerCase())) : base;
+  const learning = usable.filter((r) => r.status !== "mastered");
+  const mastered = usable.filter((r) => r.status === "mastered");
 
   const rng = makeRng(scope.seed || 20260916);
   // 明确指定 status='mastered' 时,已学会词就是**主池**(用于专项复查),不再当抽样
@@ -148,7 +168,7 @@ export function pickExamWords({ db, queryWords, userId, scope = {}, count = 10, 
     const primary = shuffle(mastered, rng).slice(0, count);
     return {
       picked: primary.map((row) => ({ row, recheck: true })),
-      pool: { learning: learning.length, mastered: mastered.length, matched: base.length },
+      pool: { learning: learning.length, mastered: mastered.length, matched: usable.length, excluded: base.length - usable.length },
       recheckRatio: 1,
     };
   }
@@ -163,7 +183,7 @@ export function pickExamWords({ db, queryWords, userId, scope = {}, count = 10, 
   const picked = shuffle([...primary.map((r) => ({ row: r, recheck: false })), ...recheck.map((r) => ({ row: r, recheck: true }))], rng);
   return {
     picked,
-    pool: { learning: learning.length, mastered: mastered.length, matched: base.length },
+    pool: { learning: learning.length, mastered: mastered.length, matched: usable.length, excluded: base.length - usable.length },
     recheckRatio,
   };
 }
@@ -206,8 +226,11 @@ export function buildExamPrompt(items, opts = {}) {
     "",
     "=== 句子规则 ===",
     "S1. 如果给了 given_sentence，就**原样沿用**，不要改写。",
-    "S2. 没给就自己写一句：**必须真的包含该词**（可用其复数/过去式/现在分词形式），≤12 个英文单词，",
-    "    内容用学生熟悉的场景（学校、家里、食堂、操场、宠物）。",
+    "S2. 没给就自己写一句：**必须原样出现这个单词**，≤12 个英文单词，内容用学生熟悉的场景（学校、家里、食堂、操场、宠物）。",
+    "    只能加常见后缀（-s/-es/-ed/-ing）；**不许换成派生词**：health 不能写成 healthy，kind 不能写成 kindness，",
+    "    eight 不能写成 eighteen。",
+    '    正例: health → "Good health comes from sleep and vegetables."   eight → "I get up at eight every morning."',
+    '    反例: health → "Eating well keeps you healthy."（句子里没有出现 health）',
     "S3. 句子要能体现该词在这个语境里的**具体词义**，不要写成词典例句般的空话。",
     "",
     "=== 干扰项规则（决定这份卷子有没有用）===",
@@ -345,6 +368,34 @@ export function composeQuestion({ item, raw, answerIndex, pool, rng }) {
   };
 }
 
+/** 补句子:只针对"模型写的句子不含原词"的失败,来一次窄指令调用(成功率很高) */
+export function buildSentenceRepairPrompt(words) {
+  return [
+    "给下面每个英语单词各写一句英文句子，只为补句子，不要做别的。",
+    "硬要求:",
+    "1. 句子里必须**原样出现这个词**（只允许加 -s / -es / -ed / -ing 后缀）；",
+    "   **不许用派生词替换**：health 不能写成 healthy，kind 不能写成 kindness，eight 不能写成 eighteen。",
+    "2. 每句 5~10 个英文单词，用学生熟悉的场景。",
+    '3. 只输出 JSON 数组，形如 [{"word":"health","sentence":"..."}]，顺序与输入一致，不要解释。',
+    "",
+    "单词列表(JSON):",
+    JSON.stringify(words.map((w) => (typeof w === "string" ? w : w.word))),
+  ].join("\n");
+}
+
+/** 从补句子的输出里取回 word → sentence */
+export function parseSentenceRepair(text, wanted) {
+  const out = new Map();
+  for (const it of parseExamOutput(text)) {
+    const w = clean(it && it.word).toLowerCase();
+    const s = clean(it && it.sentence);
+    if (!w || !s) continue;
+    if (Array.isArray(wanted) && wanted.length && !wanted.includes(w)) continue;
+    out.set(w, s);
+  }
+  return out;
+}
+
 /**
  * 出题主流程。
  * @param {{llm:any, provider:string, model:string, db:any, queryWords:Function, userId:number,
@@ -376,7 +427,9 @@ export async function generateExam({
 
   const positions = allocateAnswerPositions(items.length, rng);
   const questions = [];
-  const failures = [];
+  let failures = [];
+  const rawMap = new Map(); // word → 第一轮模型给的原句/干扰项,补句子后还要复用
+  const okWords = new Set();
 
   const size = Math.max(1, Math.min(12, Number(batchSize) || 6));
   for (let i = 0; i < items.length; i += size) {
@@ -401,6 +454,7 @@ export async function generateExam({
       }
     }
     const byWord = new Map(parsed.map((p) => [clean(p && p.word).toLowerCase(), p]));
+    for (const [k, v] of byWord) rawMap.set(k, v);
 
     for (const item of batch) {
       const idx = items.indexOf(item);
@@ -408,11 +462,65 @@ export async function generateExam({
       const composed = composeQuestion({ item, raw: byWord.get(item.word), answerIndex: positions[idx], pool, rng });
       if (composed.ok) {
         questions.push({ ...composed.question, wordId: item.row.id, isRecheck: item.recheck, pos: item.pos || (byWord.get(item.word) || {}).pos || "" });
+        okWords.add(item.word);
       } else {
         failures.push({ word: item.word, reasons: composed.issues });
       }
     }
   }
+
+  // 补句子重试:实测最常见的失败是"模型把词换成了派生词"(health→healthy),窄指令再问一次成功率很高
+  const sentenceFails = failures.filter((f) => f.reasons.some((r) => r.includes("缺少包含该词的句子")));
+  if (sentenceFails.length && llm && typeof llm.stream === "function") {
+    const wanted = sentenceFails.map((f) => f.word);
+    let repaired = new Map();
+    try {
+      const text = await collectText(
+        llm,
+        {
+          provider,
+          model,
+          messages: [await createUserMsg(buildSentenceRepairPrompt(wanted))],
+          maxTokens: 1500,
+          temperature: 0.5,
+        },
+        signal,
+      );
+      repaired = parseSentenceRepair(text, wanted);
+    } catch (err) {
+      if (logger) logger.warn(`dsh-word-vault: 补句子调用失败 - ${err && err.message ? err.message : err}`);
+    }
+    const stillFailing = [];
+    for (const f of sentenceFails) {
+      const item = items.find((it) => it.word === f.word);
+      const s = repaired.get(f.word);
+      if (item && s && sentenceHasWord(s, item.word)) {
+        const idx = items.indexOf(item);
+        const pool = libraryDistractorPool(db, userId, item.pos, item.word);
+        const composed = composeQuestion({
+          item: { ...item, sentence: s },
+          raw: rawMap.get(f.word),
+          answerIndex: positions[idx],
+          pool,
+          rng,
+        });
+        if (composed.ok) {
+          questions.push({ ...composed.question, wordId: item.row.id, isRecheck: item.recheck, pos: item.pos });
+          okWords.add(item.word);
+          if (logger) logger.info(`dsh-word-vault: 补句子救回 ${item.word}`);
+          continue;
+        }
+        stillFailing.push({ word: f.word, reasons: composed.issues });
+      } else {
+        stillFailing.push({ word: f.word, reasons: [...f.reasons, "补句子仍未包含原词"] });
+      }
+    }
+    // 非句子类失败原样保留
+    failures = failures.filter((f) => !f.reasons.some((r) => r.includes("缺少包含该词的句子"))).concat(stillFailing);
+  }
+
+  // 保序输出(与选词顺序一致),便于试卷与位置分布可预期
+  questions.sort((a, b) => items.findIndex((i) => i.word === a.word) - items.findIndex((i) => i.word === b.word));
 
   if (logger) {
     logger.info(`dsh-word-vault: 出题 ${questions.length}/${items.length} 道,不合格 ${failures.length},候选池 ${JSON.stringify(picked.pool)}`);
