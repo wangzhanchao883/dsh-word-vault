@@ -262,6 +262,17 @@ function renderUsers(list, current) {
   };
 }
 
+/** 动作请求体:勾选了词就只对勾选的词动手(limit 至少等于勾选数量,否则会被截断) */
+function actionBody(extra) {
+  const picked = [...state.selected];
+  const body = Object.assign({ group: state.group, q: state.q, sort: state.sort, limit: 8 }, extra || {});
+  if (picked.length) {
+    body.words = picked;
+    body.limit = Math.max(body.limit, picked.length);
+  }
+  return body;
+}
+
 function renderTabs(groups) {
   document.getElementById('tabs').innerHTML = Object.keys(GROUPS).map((g) =>
     '<button class="tab' + (state.group === g ? ' on' : '') + '" data-g="' + g + '">' + GROUPS[g] +
@@ -393,7 +404,7 @@ async function doAction(kind) {
   try {
     if (kind === 'answer') {
       // 在线答题:只给一个可点入口,不产文件
-      const r = await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: 'answer' });
+      const r = await post('/api/actions/exam', actionBody({ count: 10, mode: 'answer' }));
       showResult(
         '<b>试卷已生成（' + r.questions + ' 题）</b><br>' +
         '<a class="bigbtn" href="' + esc(r.url) + '" target="_blank" rel="noopener">👉 打开答题页，开始做题</a><br>' +
@@ -404,7 +415,7 @@ async function doAction(kind) {
     }
     if (kind === 'paper') {
       // 打印试卷:只给 PDF 入口(可在页面直接打开/下载)
-      const r = await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: 'paper' });
+      const r = await post('/api/actions/exam', actionBody({ count: 10, mode: 'paper' }));
       const fileLink = (p, label) => (p ? '<a class="bigbtn" href="' + BASE + '/file?p=' + encodeURIComponent(p) + '" target="_blank" rel="noopener">' + label + '</a>' : '');
       showResult(
         '<b>打印试卷已生成（' + r.questions + ' 题）</b><br>' +
@@ -417,7 +428,7 @@ async function doAction(kind) {
       return;
     }
     // 出记忆卡:主入口给 PDF 预览,其余文件收进"更多"
-    const r = await post('/api/actions/cards', { group: state.group, q: state.q, sort: state.sort, limit: 8 });
+    const r = await post('/api/actions/cards', actionBody());
     const f = r.files || {};
     showResult(
       '<b>记忆卡已生成（' + r.cards + ' 张' + (r.generatedNow ? '，新生成 ' + r.generatedNow + ' 张' : '') + '）</b><br>' +

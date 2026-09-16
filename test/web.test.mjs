@@ -566,6 +566,13 @@ test("用户切换:接口带出用户库列表,可按 user 查指定库,写操�
     assert.ok(page.includes('id="user"'), "应有用户切换下拉");
     assert.ok(page.includes("user: state.user"), "写操作应带上当前用户");
     assert.ok(page.includes("bootUser"), "应支持 ?user= 直达某个库");
+    // 回归:勾选后点动作,必须把勾选的词发给后端(曾经只传分组/排序,导致"勾了 12 个只出 1 张卡")
+    assert.ok(page.includes("function actionBody"), "应有统一的动作请求体构造");
+    assert.ok(page.includes("body.words = picked"), "勾选后必须把词带上");
+    assert.ok(page.includes("await post('/api/actions/cards', actionBody())"), "出卡必须走 actionBody");
+    assert.ok(page.includes("actionBody({ count: 10, mode: 'answer' })"), "在线答题必须走 actionBody");
+    assert.ok(page.includes("actionBody({ count: 10, mode: 'paper' })"), "打印试卷必须走 actionBody");
+    assert.ok(page.includes("body.limit = Math.max(body.limit, picked.length)"), "limit 不能截断勾选");
     const script = (page.match(/<script>([\s\S]*?)<\/script>/) || [])[1];
     assert.doesNotThrow(() => new Function(script), "页面脚本语法错误");
   } finally {
