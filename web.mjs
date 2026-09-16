@@ -193,6 +193,7 @@ ${NAV_CSS}</style></head><body><div class="wrap">
 ${nav("/")}
 <div class="cards" id="kpis"></div>
 <div class="bar">
+  <select id="user" title="切换用户库"></select>
   <span id="tabs"></span>
   <span class="spacer"></span>
   <input type="search" id="q" placeholder="搜索单词 / 释义 / 词性">
@@ -226,13 +227,15 @@ const API = ${JSON.stringify(WEB_PATH)} + '/api/library';
 const BASE = ${JSON.stringify(WEB_PATH)};
 const SORTS = ${JSON.stringify(SORTS)};
 const GROUPS = ${JSON.stringify(GROUP_LABELS)};
-const state = { group: 'all', q: '', sort: 'count', selected: new Set() };
+const state = { user: '', group: 'all', q: '', sort: 'count', selected: new Set() };
 
 function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 async function post(path, body) {
+  // 所有写操作都带上当前正在看的用户库
+  const payload = Object.assign({ user: state.user }, body || {});
   const res = await fetch(BASE + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });
   const data = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
   if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status));
@@ -243,6 +246,20 @@ function showResult(html, cls) {
   const el = document.getElementById('result');
   el.className = 'result' + (cls ? ' ' + cls : '');
   el.innerHTML = html;
+}
+
+function renderUsers(list, current) {
+  const sel = document.getElementById('user');
+  if (!sel) return;
+  const cur = current || state.user;
+  sel.innerHTML = (list || []).map((u) =>
+    '<option value="' + esc(u.name) + '"' + (u.name === cur ? ' selected' : '') + '>' +
+    esc(u.name) + '（' + u.words + ' 词）</option>').join('');
+  sel.onchange = () => {
+    state.user = sel.value;
+    state.selected.clear();
+    load();
+  };
 }
 
 function renderTabs(groups) {
@@ -468,11 +485,13 @@ async function markSelected(mastered) {
 }
 
 async function load() {
-  const url = API + '?group=' + encodeURIComponent(state.group) + '&q=' + encodeURIComponent(state.q) + '&sort=' + encodeURIComponent(state.sort);
+  const url = API + '?user=' + encodeURIComponent(state.user) + '&group=' + encodeURIComponent(state.group) + '&q=' + encodeURIComponent(state.q) + '&sort=' + encodeURIComponent(state.sort);
   try {
     const res = await fetch(url, { headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const p = await res.json();
+    state.user = p.user || state.user;
+    renderUsers(p.users, p.user);
     renderTabs(p.groups); renderKpis(p); renderRows(p);
     document.querySelector('h1 small').textContent =
       '用户 ' + p.user + ' · 高频门槛 标记 ≥' + p.highFreqMin + ' 次 · 匹配 ' + p.matched + ' / 共 ' + p.total + ' 词 · 更新于 ' + String(p.generatedAt).slice(11, 19);
@@ -485,6 +504,8 @@ const q = document.getElementById('q');
 let timer = null;
 q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { state.q = q.value; load(); }, 200); });
 document.getElementById('reload').addEventListener('click', load);
+const bootUser = new URLSearchParams(location.search).get('user');
+if (bootUser) state.user = bootUser;
 renderSort(); load();
 </script></body></html>`;
 }
@@ -629,7 +650,8 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
         send(
           res,
           200,
-          buildLibraryPayload({
+          {
+            ...buildLibraryPayload({
             db, queryWords, stats, cardStats,
             userId: user.id,
             userName: user.name,
@@ -638,7 +660,9 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
             q: url.searchParams.get("q") || "",
             sort: url.searchParams.get("sort") || "count",
             limit: Number(url.searchParams.get("limit")) || 500,
-          }),
+            }),
+            users: typeof userOverview === "function" ? userOverview() : [],
+          },
         );
         return;
       }

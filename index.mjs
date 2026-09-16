@@ -382,22 +382,52 @@ export function apply(ctx, input = {}) {
         ctx.logger.info(`dsh-word-vault: 用户库改名 ${r.from} -> ${r.to}`);
         return { ...r, users: userOverview(db), defaultUser: nextDefault };
       },
-      /** 按页面筛选出记忆卡(缺卡片的先补生成) */
+      /** 按页面筛选出记忆卡(缺卡片的先补生成;缺释义的先补翻译) */
       cards: async ({ user, status, minCount, words, orderBy, limit }) => {
         const picked = pickWordRows({ user: user.name, status, minCount, orderBy, words, limit }, { onlyMissing: false, limit });
         if (picked.error) return { ok: false, error: picked.error };
         if (!picked.rows.length) return { ok: false, error: "当前筛选下没有词" };
+        // 缺释义的先补翻译(卡片与题目都需要释义;与出卷走同一条路)
+        const noMeaning = picked.rows.filter((r) => !String(r.meaning || "").trim());
+        let translated = 0;
+        if (noMeaning.length) {
+          const t = await translateWords({
+            llm: ctx.get("llm"),
+            provider: liveConfig.provider,
+            model: liveConfig.model,
+            words: noMeaning.map((r) => ({ term: r.lemma })),
+            logger: ctx.logger,
+          });
+          if (t.size) {
+            upsertDict(db, [...t.entries()].map(([term, v]) => ({ term, kind: "word", phonetic: v.phonetic, pos: v.pos, meaning: v.meaning, source: "llm-card" })));
+            translated = t.size;
+          }
+        }
         const missing = picked.rows.filter((r) => !r.card_updated_at);
         let generatedNow = 0;
+        let genFailures = [];
         if (missing.length) {
           const gen = await generateAndStore(missing, picked.user, undefined);
           generatedNow = gen.stored;
+          genFailures = gen.failures || [];
         }
         const idSet = new Set(picked.rows.map((r) => r.id));
         const ready = queryWords(db, { userId: picked.user.id, kind: "word", orderBy: "count", limit: 2000 }).filter(
           (r) => idSet.has(r.id) && r.card_updated_at,
         );
-        if (!ready.length) return { ok: false, error: "卡片内容生成失败(可重试或换模型)", generatedNow };
+        if (!ready.length) {
+          return {
+            ok: false,
+            error:
+              "卡片内容没能生成。" +
+              (genFailures.length
+                ? `原因：${genFailures.map((f) => `${f.word}(${f.reasons.join("；")})`).join(" / ")}`
+                : "模型没有返回可用内容") +
+              " 可稍后重试；若反复失败，多半是宿主调模型这一侧的问题（可在设置里换模型，或告诉我，我看日志）。",
+            failures: genFailures,
+            autoTranslated: translated,
+          };
+        }
         const list = ready.map((r) => {
           let segs = [];
           try {

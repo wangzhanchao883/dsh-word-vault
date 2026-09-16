@@ -183,10 +183,12 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
 
   for (const batch of batches) {
     let parsed = [];
+    let callError = "";
     try {
       parsed = await askOnce(batch, "");
     } catch (err) {
-      if (logger) logger.warn(`dsh-word-vault: 记忆卡生成失败 - ${err && err.message ? err.message : err}`);
+      callError = err && err.message ? err.message : String(err);
+      if (logger) logger.warn(`dsh-word-vault: 记忆卡生成失败 - ${callError}`);
     }
     const byWord = new Map(parsed.map((p) => [clean(p && p.word).toLowerCase(), p]));
     const bad = []; // 硬失败 或 质量不合格 → 都值得重试一次
@@ -194,7 +196,8 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
       const key = String(item.word).toLowerCase();
       const raw = byWord.get(key);
       if (!raw) {
-        failures.push({ word: key, reasons: ["模型未返回该词"] });
+        // 调用失败时把**真实错误**带上(否则界面只显示"生成失败",没法排查)
+        failures.push({ word: key, reasons: [callError ? `模型调用失败:${callError}` : "模型未返回该词"] });
         continue;
       }
       const v = validateCard(raw, key);

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildLibraryPayload, buildLibraryPageHtml, buildHelpPageHtml, buildSettingsPageHtml, registerWebUi, resolveScope, SETTINGS_SPEC, WEB_PATH, GROUP_LABELS } from "../web.mjs";
-import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, upsertCard, createExamSession, addExamQuestion, answerExamQuestion } from "../db.mjs";
+import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, upsertCard, createExamSession, addExamQuestion, answerExamQuestion, userOverview } from "../db.mjs";
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "wv-web-"));
@@ -253,8 +253,8 @@ async function mountRoute(db, actions = {}, cfg = {}) {
       cb({ webServer: { register: (r) => { route = r; return () => {}; } } });
     },
   };
-  // cfg 里的 getSettings/writeSettings 是 registerWebUi 的顶层依赖,其余是 liveConfig 的覆盖项
-  const { getSettings, writeSettings, ...liveCfg } = cfg;
+  // cfg 里的这几个是 registerWebUi 的顶层依赖,其余是 liveConfig 的覆盖项
+  const { getSettings, writeSettings, userOverview: userOverviewFn, ...liveCfg } = cfg;
   registerWebUi(ctx, {
     db, queryWords, stats, cardStats,
     liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 }, ...liveCfg },
@@ -262,6 +262,7 @@ async function mountRoute(db, actions = {}, cfg = {}) {
     actions,
     getSettings,
     writeSettings,
+    userOverview: userOverviewFn,
   });
   assert.ok(route, "路由应已注册");
   const srv = createServer((req, res) => route.handler(req, res));
@@ -538,6 +539,40 @@ test("导航:三个页面互相可达且各自高亮", () => {
   assert.match(help, /navlink on"[^>]*href="\/word-vault\/help"/, "说明页应高亮「使用说明」");
   assert.match(set, /navlink on"[^>]*href="\/word-vault\/settings"/, "设置页应高亮「设置」");
   assert.ok(SETTINGS_SPEC.some((x) => x.key === "highFreqMin"));
+});
+
+test("用户切换:接口带出用户库列表,可按 user 查指定库,写操作认 user", async () => {
+  const s = setup();
+  const u2 = ensureUser(s.db, "王展超");
+  recordEntries(s.db, { userId: u2.id, entries: [{ term: "elephants", lemma: "elephant" }], kind: "hotkey", via: "clipboard", context: "elephants" });
+  const r = await mountRoute(s.db, {}, { userOverview: () => userOverview(s.db) });
+  try {
+    const one = await (await fetch(`${r.base}/api/library`)).json();
+    assert.equal(one.user, "用户1", "不传 user 时用默认库");
+    assert.ok(Array.isArray(one.users) && one.users.length >= 2, "应带出用户库列表");
+    assert.ok(one.users.every((u) => typeof u.words === "number"), "列表带词数");
+
+    const two = await (await fetch(`${r.base}/api/library?user=${encodeURIComponent("王展超")}`)).json();
+    assert.equal(two.user, "王展超");
+    assert.deepEqual(two.rows.map((x) => x.word), ["elephant"]);
+    assert.equal(two.total, 1);
+
+    const ok = await r.post("/api/word/mastery", { user: "王展超", word: "elephant", mastered: true });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.equal(s.db.prepare("SELECT status FROM words WHERE user_id = ? AND lemma = 'elephant'").get(u2.id).status, "mastered");
+    assert.equal((await r.post("/api/word/mastery", { word: "elephant", mastered: true })).status, 404, "不传 user 时落到默认库,那里没有这个词");
+
+    const page = await (await fetch(`${r.base}/`)).text();
+    assert.ok(page.includes('id="user"'), "应有用户切换下拉");
+    assert.ok(page.includes("user: state.user"), "写操作应带上当前用户");
+    assert.ok(page.includes("bootUser"), "应支持 ?user= 直达某个库");
+    const script = (page.match(/<script>([\s\S]*?)<\/script>/) || [])[1];
+    assert.doesNotThrow(() => new Function(script), "页面脚本语法错误");
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
 });
 
 test("registerWebUi:没有 webServer 服务时静默跳过(不影响 headless)", () => {
