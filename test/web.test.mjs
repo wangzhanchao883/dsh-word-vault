@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildLibraryPayload, buildLibraryPageHtml, registerWebUi, WEB_PATH, GROUP_LABELS } from "../web.mjs";
-import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats } from "../db.mjs";
+import { buildLibraryPayload, buildLibraryPageHtml, registerWebUi, resolveScope, WEB_PATH, GROUP_LABELS } from "../web.mjs";
+import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, upsertCard, createExamSession, addExamQuestion, answerExamQuestion } from "../db.mjs";
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "wv-web-"));
@@ -149,6 +149,33 @@ test("来源列:带出最近一次录入的 via 与原文片段", () => {
   }
 });
 
+test("总览页脚本语法自检:页面里的 JS 必须能被解析(防大括号/引号写坏)", () => {
+  const html = buildLibraryPageHtml({ userName: "用户1", highFreqMin: 2 });
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(m, "页面里应有内联脚本");
+  const script = m[1];
+  assert.doesNotThrow(() => new Function(script), "页面脚本语法错误");
+  for (const fn of ["function renderRows", "function startEdit", "async function doDelete", "async function doAction", "async function markSelected", "async function load"]) {
+    assert.ok(script.includes(fn), `页面脚本缺少 ${fn}`);
+  }
+  const open = (script.match(/{/g) || []).length;
+  const close = (script.match(/}/g) || []).length;
+  assert.equal(open, close, `大括号不配平:${open} vs ${close}`);
+});
+
+test("resolveScope:页面筛选 → 查询范围的映射", () => {
+  assert.deepEqual(resolveScope({ group: "all", limit: 8 }), { orderBy: "count", words: undefined, limit: 8 });
+  assert.equal(resolveScope({ group: "mastered" }).status, "mastered");
+  assert.equal(resolveScope({ group: "learning" }).status, "learning");
+  const hot = resolveScope({ group: "hot", highFreqMin: 3 });
+  assert.equal(hot.status, "learning");
+  assert.equal(hot.minCount, 3, "高频易错 = 未学会 且 次数≥阈值");
+  assert.equal(resolveScope({ q: " kinds ", limit: 5 }).words, "kinds");
+  assert.equal(resolveScope({ limit: 9999 }).limit, 200, "上限夹住");
+  assert.equal(resolveScope({ limit: 0 }).limit, 8, "缺省 8");
+  assert.equal(resolveScope({ sort: "alpha" }).orderBy, "alpha");
+});
+
 test("总览页 HTML:自包含、指向同源 API、含四个分组", () => {
   const html = buildLibraryPageHtml({ userName: "用户1", highFreqMin: 2 });
   assert.match(html, /英语生词库/);
@@ -198,7 +225,10 @@ test("registerWebUi:有 webServer 时注册路由并可通过 HTTP 取到数据"
 
       const missing = await fetch(`http://127.0.0.1:${port}${WEB_PATH}/api/nope`).then((r) => r.status);
       assert.equal(missing, 404);
-      const badMethod = await fetch(`http://127.0.0.1:${port}${WEB_PATH}/api/library`, { method: "POST" }).then((r) => r.status);
+      // 写操作必须带 JSON Content-Type(挡简单表单式跨站提交)
+      const badType = await fetch(`http://127.0.0.1:${port}${WEB_PATH}/api/word/mastery`, { method: "POST", body: "x=1" }).then((r) => r.status);
+      assert.equal(badType, 415);
+      const badMethod = await fetch(`http://127.0.0.1:${port}${WEB_PATH}/api/library`, { method: "PUT" }).then((r) => r.status);
       assert.equal(badMethod, 405);
       const badUser = await fetch(`http://127.0.0.1:${port}${WEB_PATH}/api/library?user=不存在`).then((r) => r.status);
       assert.equal(badUser, 404);
@@ -208,6 +238,137 @@ test("registerWebUi:有 webServer 时注册路由并可通过 HTTP 取到数据"
   } finally {
     closeDb(s.db);
     rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+/** 把词库路由挂到一个真实 http 服务上(与宿主同款 (req,res) 签名) */
+async function mountRoute(db, actions = {}) {
+  let route = null;
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    effect() {
+      return () => {};
+    },
+    inject(names, cb) {
+      cb({ webServer: { register: (r) => { route = r; return () => {}; } } });
+    },
+  };
+  registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig: { defaultUser: "用户1", highFreqMin: 2, exam: { count: 4 } }, logger: ctx.logger, actions });
+  assert.ok(route, "路由应已注册");
+  const srv = createServer((req, res) => route.handler(req, res));
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const port = srv.address().port;
+  const base = `http://127.0.0.1:${port}${WEB_PATH}`;
+  const post = async (path, body) => {
+    const res = await fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, data: await res.json().catch(() => ({})) };
+  };
+  return { base, post, close: () => new Promise((r) => srv.close(r)) };
+}
+
+test("写操作:改释义 / 手动掌握度 / 删除预览 / 删除(连带清理,外键回归)", async () => {
+  const s = setup();
+  const word = s.db.prepare("SELECT * FROM words WHERE lemma = 'plant'").get();
+  // 给这个词造卡片 + 考试记录:老 deleteWord 在这种词上会 FOREIGN KEY 报错
+  upsertCard(s.db, { userId: s.userId, wordId: word.id, term: "plant", segs: [{ en: "plant", cn: "普兰" }], story: "s" });
+  const sess = createExamSession(s.db, { userId: s.userId, scope: {}, count: 1 });
+  addExamQuestion(s.db, { sessionId: sess.id, seq: 1, wordId: word.id, promptWord: "plant", sentence: "A plant.", correctMeaning: "植物", options: ["植物", "x", "y", "z"], answerIndex: 0 });
+  answerExamQuestion(s.db, { sessionId: sess.id, seq: 1, chosenIndex: 0 });
+
+  const r = await mountRoute(s.db);
+  try {
+    // 改释义
+    const up = await r.post("/api/word/update", { word: "plant", meaning: "植物；种植", pos: "n.", phonetic: "/plɑːnt/" });
+    assert.equal(up.status, 200, JSON.stringify(up.data));
+    assert.equal(s.db.prepare("SELECT meaning FROM dict WHERE term='plant'").get().meaning, "植物；种植");
+    assert.equal(s.db.prepare("SELECT source FROM dict WHERE term='plant'").get().source, "manual");
+    assert.equal((await r.post("/api/word/update", { word: "nosuchword", meaning: "x" })).status, 404);
+    assert.equal((await r.post("/api/word/update", { meaning: "x" })).status, 400);
+
+    // 手动掌握度
+    assert.equal((await r.post("/api/word/mastery", { word: "plant", mastered: true })).status, 200);
+    assert.equal(s.db.prepare("SELECT status FROM words WHERE lemma='plant'").get().status, "mastered");
+    assert.equal((await r.post("/api/word/mastery", { word: "plant", mastered: false })).status, 200);
+    assert.equal(s.db.prepare("SELECT status FROM words WHERE lemma='plant'").get().status, "learning");
+    assert.equal((await r.post("/api/word/mastery", { word: "nosuchword", mastered: true })).status, 404);
+
+    // 删除预览:必须列出连带影响
+    const pv = await r.post("/api/words/delete-preview", { words: ["plant", "nosuchword"] });
+    assert.equal(pv.status, 200);
+    const hit = pv.data.impact.find((x) => x.lemma === "plant");
+    assert.equal(hit.found, true);
+    assert.equal(hit.cards, 1);
+    assert.equal(hit.examQuestions, 1);
+    assert.equal(hit.examAnswers, 1);
+    assert.ok(hit.events >= 2, "plant 录过两次");
+    assert.equal(pv.data.impact.find((x) => x.lemma === "nosuchword").found, false);
+
+    // 删除:连带清理,且不报外键错
+    const del = await r.post("/api/words/delete", { words: ["plant"] });
+    assert.equal(del.status, 200, JSON.stringify(del.data));
+    assert.equal(del.data.deleted.length, 1);
+    assert.equal(del.data.removed.cards, 1);
+    assert.equal(del.data.removed.examQuestions, 1);
+    assert.equal(del.data.removed.examAnswers, 1);
+    assert.equal(s.db.prepare("SELECT COUNT(*) n FROM words WHERE lemma='plant'").get().n, 0);
+    assert.equal(s.db.prepare("SELECT COUNT(*) n FROM cards WHERE word_id=?").get(word.id).n, 0);
+    assert.equal(s.db.prepare("SELECT COUNT(*) n FROM exam_questions WHERE word_id=?").get(word.id).n, 0);
+    assert.equal(s.db.prepare("SELECT COUNT(*) n FROM exam_answers WHERE word_id=?").get(word.id).n, 0);
+    assert.equal((await r.post("/api/words/delete", { words: ["nosuchword"] })).status, 404);
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test("动作:出卡/出卷走注入的实现,按分组与搜索解析范围", async () => {
+  const s = setup();
+  const seen = [];
+  const actions = {
+    cards: async (req) => {
+      seen.push({ kind: "cards", ...req });
+      return { ok: true, cards: 2, files: { html: "X:/a.html", pdf: "X:/a.pdf" } };
+    },
+    exam: async (req) => {
+      seen.push({ kind: "exam", ...req });
+      return { ok: true, questions: 4, url: "http://127.0.0.1:1/e/tok", files: { paperPdf: "X:/p.pdf" } };
+    },
+  };
+  const r = await mountRoute(s.db, actions);
+  try {
+    const c = await r.post("/api/actions/cards", { group: "hot", q: "", sort: "count", limit: 5 });
+    assert.equal(c.status, 200);
+    assert.equal(c.data.cards, 2);
+    assert.equal(seen[0].kind, "cards");
+    assert.equal(seen[0].status, "learning", "高频易错 = 未学会");
+    assert.equal(seen[0].minCount, 2);
+    assert.equal(seen[0].limit, 5);
+
+    const e = await r.post("/api/actions/exam", { group: "all", q: "kind", count: 3, mode: "answer" });
+    assert.equal(e.status, 200);
+    assert.match(e.data.url, /^http:/);
+    assert.equal(seen[1].kind, "exam");
+    assert.equal(seen[1].mode, "answer");
+    assert.equal(seen[1].words, "kind", "搜索词按指定词处理");
+    assert.equal(seen[1].limit, 3);
+  } finally {
+    await r.close();
+    closeDb(s.db);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+
+  // 没注入实现时给出可读的 501
+  const s2 = setup();
+  const r2 = await mountRoute(s2.db, {});
+  try {
+    const res = await r2.post("/api/actions/cards", { group: "all" });
+    assert.equal(res.status, 501);
+    assert.match(res.data.error, /不支持出卡/);
+  } finally {
+    await r2.close();
+    closeDb(s2.db);
+    rmSync(s2.dir, { recursive: true, force: true });
   }
 });
 

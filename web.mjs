@@ -10,7 +10,7 @@
  * 本阶段(P5.1)只读:统计卡 + 四组视图(全部/已记住/没记住/高频易错) + 搜索 + 排序 + 表格。
  * 写操作(改释义/删词/批量清理)与动作按钮(出卡/出卷/开始答题)留到 P5.2。
  */
-import { nowIso } from "./db.mjs";
+import { nowIso, updateDictMeaning, wordDeleteImpact, deleteWords, setStatus } from "./db.mjs";
 
 /** 页面与 API 共用的路由前缀(prefix 路由:'/word-vault' 同时匹配它自己与子路径) */
 export const WEB_PATH = "/word-vault";
@@ -147,17 +147,35 @@ h1 small { font-size: 12px; font-weight: 400; color:var(--gray); margin-left: 10
 input[type=search], select { font-size:14px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
 input[type=search] { min-width:220px; }
 .spacer { flex:1 1 auto; }
+.actbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-top:10px; }
+.btn { font-size:13px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:var(--soft); color:var(--ink); cursor:pointer; }
+.btn:hover:not(:disabled) { border-color:var(--blue); }
+.btn.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:700; }
+.btn.danger { color:var(--hot); border-color:#e8b7a8; background:#fdf1ee; font-weight:700; }
+.btn:disabled { opacity:.5; cursor:default; }
+.mini { font-size:11px; padding:3px 8px; border-radius:6px; border:1px solid var(--line); background:#fff; color:#41556b; cursor:pointer; margin-right:4px; }
+.mini:hover { border-color:var(--blue); color:var(--blue); }
+td.editable { cursor:text; }
+td.editable:hover { background:#fbfdff; box-shadow: inset 0 0 0 1px var(--line); }
+input.edit { font-size:12px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; margin:0 4px 4px 0; width:150px; }
+input.edit.small { width:90px; }
+.result { background:#fff; border:1px solid var(--line); border-left:3px solid var(--blue); border-radius:8px; padding:10px 14px; margin-top:10px; font-size:13px; line-height:1.8; word-break:break-all; }
+.result.ok { border-left-color:var(--ok); }
+.result.err { border-left-color:var(--hot); background:#fdeaea; }
+.result.hide { display:none; }
+.result code { background:#f2f6fa; padding:1px 5px; border-radius:4px; font-size:12px; }
 table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-top:14px; font-size:13px; }
-th, td { padding:8px 10px; border-bottom:1px solid #eaf1f7; text-align:left; vertical-align:top; }
+th, td { padding:8px 10px; border-bottom:1px solid #eaf1f7; text-align:left; vertical-align:top; white-space:nowrap; }
 th { background:var(--soft); font-size:12px; color:#41556b; position:sticky; top:0; }
 tr:last-child td { border-bottom:none; }
+td.mean { white-space:normal; min-width:180px; }
 .w { font-family:"Segoe UI",Arial,sans-serif; font-size:15px; font-weight:700; }
 .pill { display:inline-block; font-size:11px; border-radius:999px; padding:1px 7px; margin-left:6px; border:1px solid; }
 .pill.hot { color:var(--hot); border-color:#e8b7a8; background:#fdf1ee; font-weight:700; }
 .pill.ok { color:var(--ok); border-color:#a9d9bf; background:#eaf7f0; }
 .pill.no { color:#8a6d1f; border-color:#e6d39a; background:#fdf7e3; }
 .meta { color:var(--gray); font-size:12px; }
-.src { color:#5c6f82; font-size:11px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.src { color:#5c6f82; font-size:11px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .note { margin-top:16px; background:#fff; border:1px solid var(--line); border-left:3px solid var(--blue); border-radius:8px; padding:12px 14px; font-size:13px; line-height:1.8; }
 .note b { color:var(--blue); }
 .err { background:#fdeaea; border-color:#e0b4b4; color:#8b2f2f; }
@@ -172,22 +190,51 @@ tr:last-child td { border-bottom:none; }
   <select id="sort"></select>
   <button class="tab" id="reload">刷新</button>
 </div>
+<div class="actbar" id="actbar">
+  <span class="meta" id="selinfo">未选中</span>
+  <button class="btn danger" id="del">删除选中</button>
+  <button class="btn" id="markOn">标记已记住</button>
+  <button class="btn" id="markOff">标记没记住</button>
+  <span class="spacer"></span>
+  <span class="meta">对当前筛选：</span>
+  <button class="btn primary" id="actCards">出记忆卡</button>
+  <button class="btn primary" id="actPaper">出试卷</button>
+  <button class="btn primary" id="actExam">开始答题</button>
+</div>
+<div class="result hide" id="result"></div>
 <table><thead><tr>
-  <th>单词</th><th>音标</th><th>词性 · 释义</th><th>标记次数</th><th>状态</th><th>连对</th><th>考错</th><th>最近出现</th><th>首见</th><th>来源（via / 原文片段）</th>
-</tr></thead><tbody id="rows"><tr><td colspan="10" class="meta">加载中…</td></tr></tbody></table>
+  <th style="width:26px"><input type="checkbox" id="all"></th><th>单词</th><th>音标</th><th>词性 · 释义</th><th>次数</th><th>状态</th><th>连对</th><th>错</th><th>最近</th><th>来源（via / 原文片段）</th><th>操作</th>
+</tr></thead><tbody id="rows"><tr><td colspan="11" class="meta">加载中…</td></tr></tbody></table>
 <div class="note" id="note">
-  <b>怎么用这个库</b>：① 电脑上复制英文（课本/试卷/网页）→ 鼠标处弹窗点选归到哪个用户；② 拍作业照片 → 我会扫描出被荧光笔或红笔标记的<b>印刷体</b>词并入库；③ 记忆卡与试卷在对话里让我出（P5.2 会把按钮搬到这里）。<br>
-  <b>四个分组</b>：<b>已记住</b>=连续答对 3 次；<b>没记住</b>=还没打上已记住；<b>高频易错</b>=被标记次数 ≥ ${highFreqMin} 次且尚未记住（这些最该优先考）；<b>标记次数</b>=这个词被录入/被标记过几次，次数越高说明反复遇到。<br>
-  <b>来源列</b>：显示最近一次录入的渠道与原文片段。若看到 <span class="tag">entities / monorepo / --flag</span> 这类片段，说明当时复制的不是课本内容，可到 P5.2 勾选删除。
+  <b>怎么用这个库</b>：① 电脑上复制英文（课本/试卷/网页）→ 鼠标处弹窗点选归到哪个用户；② 拍作业照片 → 我扫描出被荧光笔或红笔标记的<b>印刷体</b>词并入库；③ 点上面的<b>出记忆卡 / 出试卷 / 开始答题</b>，直接按当前筛选（分组 / 搜索结果）生成。<br>
+  <b>四个分组</b>：<b>已记住</b>=连续答对 3 次（也可以手动标）；<b>没记住</b>=还没打上已记住；<b>高频易错</b>=被标记次数 ≥ ${highFreqMin} 次且尚未记住（这些最该优先考）；<b>标记次数</b>=被录入/被标记过几次，次数越高说明反复遇到。<br>
+  <b>来源列</b>：最近一次录入的渠道与原文片段。若看到 <span class="tag">entities / monorepo / --flag</span> 这类片段，说明当时复制的不是课本内容 —— 勾选后点「删除选中」清掉（会弹窗列出影响范围）。<br>
+  <b>安全</b>：删除会同时清掉该词的录入记录、记忆卡与考试记录，<b>不可撤销</b>，所以一定会先弹窗确认。
 </div>
 </div>
 <script>
 const API = ${JSON.stringify(WEB_PATH)} + '/api/library';
+const BASE = ${JSON.stringify(WEB_PATH)};
 const SORTS = ${JSON.stringify(SORTS)};
 const GROUPS = ${JSON.stringify(GROUP_LABELS)};
-const state = { group: 'all', q: '', sort: 'count' };
+const state = { group: 'all', q: '', sort: 'count', selected: new Set() };
 
-function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function post(path, body) {
+  const res = await fetch(BASE + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
+  if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+function showResult(html, cls) {
+  const el = document.getElementById('result');
+  el.className = 'result' + (cls ? ' ' + cls : '');
+  el.innerHTML = html;
+}
 
 function renderTabs(groups) {
   document.getElementById('tabs').innerHTML = Object.keys(GROUPS).map((g) =>
@@ -217,24 +264,145 @@ function renderKpis(p) {
 
 function renderRows(p) {
   const tb = document.getElementById('rows');
-  if (!p.rows.length) { tb.innerHTML = '<tr><td colspan="10" class="meta">没有匹配的词。</td></tr>'; return; }
+  if (!p.rows.length) { tb.innerHTML = '<tr><td colspan="11" class="meta">没有匹配的词。</td></tr>'; return; }
   tb.innerHTML = p.rows.map((r) => {
     const pills =
       (r.highFreq ? '<span class="pill hot">标记 ' + r.seenCount + ' 次</span>' : '') +
       (r.status === 'mastered' ? '<span class="pill ok">已记住</span>' : '<span class="pill no">没记住</span>');
+    const checked = state.selected.has(r.word) ? ' checked' : '';
     return '<tr>' +
+      '<td><input type="checkbox" class="row" data-w="' + esc(r.word) + '"' + checked + '></td>' +
       '<td><span class="w">' + esc(r.word) + '</span>' + pills + '</td>' +
       '<td class="meta">' + esc(r.phonetic) + '</td>' +
-      '<td>' + (r.pos ? '<span class="meta">' + esc(r.pos) + '</span> ' : '') + esc(r.meaning) + '</td>' +
+      '<td class="editable" data-w="' + esc(r.word) + '" data-pos="' + esc(r.pos) + '" data-ph="' + esc(r.phonetic) + '" data-m="' + esc(r.meaning) + '" title="点一下改释义">' +
+        (r.pos ? '<span class="meta">' + esc(r.pos) + '</span> ' : '') + esc(r.meaning || '（无释义，点击补）') + '</td>' +
       '<td>' + r.seenCount + '</td>' +
       '<td>' + esc(r.statusLabel) + '</td>' +
       '<td>' + r.streak + '/3</td>' +
       '<td>' + r.wrongCount + '</td>' +
       '<td class="meta">' + esc(String(r.lastSeenAt || '').slice(5, 16)) + '</td>' +
-      '<td class="meta">' + esc(String(r.firstSeenAt || '').slice(5, 16)) + '</td>' +
       '<td class="src" title="' + esc(r.via + ' · ' + r.context) + '">' + esc(r.via) + (r.context ? ' · ' + esc(r.context) : '') + '</td>' +
+      '<td><button class="mini" data-mk="' + (r.status === 'mastered' ? '0' : '1') + '" data-w="' + esc(r.word) + '">' +
+        (r.status === 'mastered' ? '标回没记住' : '标已记住') + '</button></td>' +
       '</tr>';
   }).join('');
+
+  tb.querySelectorAll('input.row').forEach((cb) => cb.addEventListener('change', () => {
+    if (cb.checked) state.selected.add(cb.dataset.w); else state.selected.delete(cb.dataset.w);
+    updateSel();
+  }));
+  tb.querySelectorAll('button.mini').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await post('/api/word/mastery', { word: b.dataset.w, mastered: b.dataset.mk === '1' });
+      showResult('已把 <b>' + esc(b.dataset.w) + '</b> 标为「' + (b.dataset.mk === '1' ? '已记住' : '没记住') + '」。', 'ok');
+      load();
+    } catch (e) { showResult('标记失败：' + esc(e.message), 'err'); b.disabled = false; }
+  }));
+  tb.querySelectorAll('td.editable').forEach((td) => td.addEventListener('click', () => startEdit(td)));
+  updateSel();
+}
+
+function updateSel() {
+  const n = state.selected.size;
+  document.getElementById('selinfo').textContent = n ? ('已选 ' + n + ' 个') : '未选中';
+}
+
+function startEdit(td) {
+  if (td.querySelector('input')) return;
+  const w = td.dataset.w;
+  const old = td.innerHTML;
+  td.innerHTML =
+    '<input class="edit" data-f="meaning" value="' + esc(td.dataset.m) + '" placeholder="中文释义">' +
+    '<input class="edit small" data-f="pos" value="' + esc(td.dataset.pos) + '" placeholder="词性">' +
+    '<input class="edit small" data-f="phonetic" value="' + esc(td.dataset.ph) + '" placeholder="音标">' +
+    '<button class="mini" data-save="1">保存</button><button class="mini" data-cancel="1">取消</button>';
+  const inputs = td.querySelectorAll('input.edit');
+  inputs[0].focus();
+  td.querySelector('[data-cancel]').addEventListener('click', (e) => { e.stopPropagation(); td.innerHTML = old; });
+  td.querySelector('[data-save]').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const val = (f) => (td.querySelector('input[data-f="' + f + '"]') || {}).value;
+    try {
+      await post('/api/word/update', { word: w, meaning: val('meaning'), pos: val('pos'), phonetic: val('phonetic') });
+      showResult('已更新 <b>' + esc(w) + '</b> 的释义。', 'ok');
+      load();
+    } catch (err) { showResult('保存失败：' + esc(err.message), 'err'); }
+  });
+}
+
+async function doDelete() {
+  const words = [...state.selected];
+  if (!words.length) { showResult('先勾选要删的词。', 'err'); return; }
+  let impact;
+  try {
+    impact = (await post('/api/words/delete-preview', { words })).impact;
+  } catch (e) { showResult('无法预览影响：' + esc(e.message), 'err'); return; }
+  const found = impact.filter((x) => x.found);
+  if (!found.length) { showResult('这些词库里已经没有了。', 'err'); return; }
+  const lines = found.map((x) =>
+    '· ' + x.term + '（标记 ' + x.seenCount + ' 次）→ 录入记录 ' + x.events + ' 条、记忆卡 ' + x.cards + ' 张、考试题 ' + x.examQuestions + ' 题、作答 ' + x.examAnswers + ' 条');
+  const missed = impact.filter((x) => !x.found).map((x) => x.lemma);
+  // 注意:本文件里页面 JS 是写在 Node 模板字符串中的,所以这里的换行必须写成 \\n,
+  // 否则会被模板字符串先解释成真换行,把生成的 JS 字符串截断(实测踩过)。
+  const ok = window.confirm('确认删除下面 ' + found.length + ' 个词？\\n\\n' + lines.join('\\n') +
+    (missed.length ? '\\n\\n（以下词库里没有，会跳过：' + missed.join('、') + '）' : '') +
+    '\\n\\n删除会一并清掉上述录入记录、记忆卡与考试记录，且不可撤销。');
+  if (!ok) { showResult('已取消删除。'); return; }
+  try {
+    const r = await post('/api/words/delete', { words: found.map((x) => x.lemma) });
+    showResult('已删除 <b>' + r.deleted.length + '</b> 个词：' + esc(r.deleted.map((d) => d.term).join('、')) +
+      '<br><span class="meta">连带清理：录入记录 ' + r.removed.events + ' 条、记忆卡 ' + r.removed.cards + ' 张、考试题 ' + r.removed.examQuestions + ' 题、作答 ' + r.removed.examAnswers + ' 条</span>', 'ok');
+    state.selected.clear();
+    load();
+  } catch (e) { showResult('删除失败：' + esc(e.message), 'err'); }
+}
+
+async function doAction(kind) {
+  const btn = document.getElementById(kind === 'cards' ? 'actCards' : kind === 'paper' ? 'actPaper' : 'actExam');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '正在生成…';
+  showResult('正在按当前筛选生成（要调模型，可能需要十几秒）…');
+  try {
+    const r = kind === 'cards'
+      ? await post('/api/actions/cards', { group: state.group, q: state.q, sort: state.sort, limit: 8 })
+      : await post('/api/actions/exam', { group: state.group, q: state.q, count: 10, mode: kind === 'paper' ? 'paper' : 'answer' });
+    const f = r.files || {};
+    const lines = [];
+    if (r.url) lines.push('<a href="' + esc(r.url) + '" target="_blank">👉 打开答题页（逐题判分，连对 3 次自动打「已学会」）</a>');
+    for (const [k, v] of Object.entries(f)) if (v) lines.push('<span class="meta">' + esc(k) + '：</span> <code>' + esc(v) + '</code>');
+    if (r.message) lines.push(esc(r.message));
+    showResult('<b>' + (kind === 'cards' ? '记忆卡' : '试卷') + '已生成</b>（' + (r.cards || r.questions || 0) + ' 个词）<br>' + lines.join('<br>'), 'ok');
+  } catch (e) {
+    showResult('生成失败：' + esc(e.message), 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+document.getElementById('all').addEventListener('change', (e) => {
+  document.querySelectorAll('input.row').forEach((cb) => {
+    cb.checked = e.target.checked;
+    if (cb.checked) state.selected.add(cb.dataset.w); else state.selected.delete(cb.dataset.w);
+  });
+  updateSel();
+});
+document.getElementById('del').addEventListener('click', doDelete);
+document.getElementById('markOn').addEventListener('click', () => markSelected(true));
+document.getElementById('markOff').addEventListener('click', () => markSelected(false));
+document.getElementById('actCards').addEventListener('click', () => doAction('cards'));
+document.getElementById('actPaper').addEventListener('click', () => doAction('paper'));
+document.getElementById('actExam').addEventListener('click', () => doAction('exam'));
+
+async function markSelected(mastered) {
+  const words = [...state.selected];
+  if (!words.length) { showResult('先勾选要标记的词。', 'err'); return; }
+  let done = 0, failed = 0;
+  for (const w of words) {
+    try { await post('/api/word/mastery', { word: w, mastered }); done += 1; } catch { failed += 1; }
+  }
+  showResult('已把 <b>' + done + '</b> 个词标为「' + (mastered ? '已记住' : '没记住') + '」' + (failed ? '，失败 ' + failed + ' 个' : '') + '。', 'ok');
+  load();
 }
 
 async function load() {
@@ -268,61 +436,200 @@ function escapeHtml(v) {
 }
 
 /**
+ * 把页面的分组/搜索选择翻译成查询范围(纯函数,便于单测)。
+ * 页面上的「高频易错」= 标记次数 ≥ 阈值 且 未学会 —— 用户 2026-09-16 定的口径。
+ */
+export function resolveScope({ group = "all", q = "", highFreqMin = 2, sort = "count", limit = 8 } = {}) {
+  const scope = { orderBy: sort === "alpha" ? "alpha" : sort === "recent" ? "recent" : "count" };
+  if (group === "mastered") scope.status = "mastered";
+  else if (group === "learning") scope.status = "learning";
+  else if (group === "hot") {
+    scope.status = "learning";
+    scope.minCount = highFreqMin;
+  }
+  const words = String(q || "").trim();
+  return { ...scope, words: words || undefined, limit: Math.max(1, Math.min(200, Number(limit) || 8)) };
+}
+
+/**
  * 挂载宿主路由(progressive injection:没有 webServer 服务时静默跳过,headless profile 不受影响)。
  * @param {any} ctx 插件 ctx
- * @param {{db:any, queryWords:Function, stats:Function, cardStats:Function, liveConfig:any, logger:any}} deps
+ * @param {{db:any, queryWords:Function, stats:Function, cardStats:Function, liveConfig:any, logger:any,
+ *          actions?:{cards?:Function, exam?:Function}}} deps
  * @returns {boolean} 是否已注册(服务可用)
  */
-export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger }) {
+export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger, actions = {} }) {
   let registered = false;
   ctx.inject(["webServer"], (webCtx) => {
-    const send = (res, code, body, type) => {
+    const send = (res, code, body, type = "application/json; charset=utf-8") => {
+      const payload = typeof body === "string" ? body : JSON.stringify(body);
       res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-store" });
-      res.end(body);
+      res.end(payload);
     };
+    const readJson = (req) =>
+      new Promise((done) => {
+        let raw = "";
+        req.on("data", (c) => {
+          raw += c;
+          if (raw.length > 1e6) req.destroy();
+        });
+        req.on("end", () => {
+          try {
+            done(raw ? JSON.parse(raw) : {});
+          } catch {
+            done(null); // 非法 JSON → 调用方回 400
+          }
+        });
+      });
+    const pickUser = (name) => db.prepare("SELECT * FROM users WHERE name = ?").get(String(name || liveConfig.defaultUser));
+
+    const routeHandler = async (req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const sub = url.pathname.slice(WEB_PATH.length) || "/";
+      const isWrite = req.method === "POST";
+      if (!isWrite && req.method !== "GET" && req.method !== "HEAD") {
+        send(res, 405, { ok: false, error: "只支持 GET/HEAD 与 POST(JSON)" });
+        return;
+      }
+      // 写操作只收 JSON:挡掉简单表单式跨站提交
+      if (isWrite && !String(req.headers["content-type"] || "").includes("application/json")) {
+        send(res, 415, { ok: false, error: "写操作需要 Content-Type: application/json" });
+        return;
+      }
+      const body = isWrite ? await readJson(req) : {};
+      if (isWrite && body === null) {
+        send(res, 400, { ok: false, error: "请求体不是合法 JSON" });
+        return;
+      }
+
+      // ---------------- 读 ----------------
+      if (!isWrite && (sub === "/" || sub === "")) {
+        send(res, 200, buildLibraryPageHtml({ userName: liveConfig.defaultUser, highFreqMin: liveConfig.highFreqMin }), "text/html; charset=utf-8");
+        return;
+      }
+      if (!isWrite && sub === "/api/library") {
+        const user = pickUser(url.searchParams.get("user"));
+        if (!user) {
+          send(res, 404, { ok: false, error: "没有这个用户" });
+          return;
+        }
+        send(
+          res,
+          200,
+          buildLibraryPayload({
+            db, queryWords, stats, cardStats,
+            userId: user.id,
+            userName: user.name,
+            highFreqMin: liveConfig.highFreqMin,
+            group: url.searchParams.get("group") || "all",
+            q: url.searchParams.get("q") || "",
+            sort: url.searchParams.get("sort") || "count",
+            limit: Number(url.searchParams.get("limit")) || 500,
+          }),
+        );
+        return;
+      }
+
+      // ---------------- 写 ----------------
+      const user = pickUser(body.user);
+      if (!user) {
+        send(res, 404, { ok: false, error: `没有这个用户:${body.user || liveConfig.defaultUser}` });
+        return;
+      }
+      if (sub === "/api/word/update") {
+        const lemma = String(body.word || "").trim().toLowerCase();
+        if (!lemma) {
+          send(res, 400, { ok: false, error: "缺少 word" });
+          return;
+        }
+        if (!db.prepare("SELECT id FROM words WHERE user_id = ? AND lemma = ?").get(user.id, lemma)) {
+          send(res, 404, { ok: false, error: `库里没有这个词:${body.word}` });
+          return;
+        }
+        const r = updateDictMeaning(db, { term: lemma, meaning: body.meaning, pos: body.pos, phonetic: body.phonetic });
+        if (logger) logger.info(`dsh-word-vault: 页面改释义 ${lemma}`);
+        send(res, 200, { ok: true, ...r });
+        return;
+      }
+      if (sub === "/api/word/mastery") {
+        const lemma = String(body.word || "").trim().toLowerCase();
+        if (!lemma) {
+          send(res, 400, { ok: false, error: "缺少 word" });
+          return;
+        }
+        const r = setStatus(db, user.id, lemma, body.mastered ? "mastered" : "learning");
+        if (!r.ok) {
+          send(res, 404, { ok: false, error: r.error });
+          return;
+        }
+        if (logger) logger.info(`dsh-word-vault: 页面手动标记 ${lemma} -> ${r.status}`);
+        send(res, 200, { ok: true, word: r.term, status: r.status });
+        return;
+      }
+      if (sub === "/api/words/delete-preview") {
+        send(res, 200, { ok: true, impact: wordDeleteImpact(db, user.id, body.words) });
+        return;
+      }
+      if (sub === "/api/words/delete") {
+        const impact = wordDeleteImpact(db, user.id, body.words);
+        const found = impact.filter((x) => x.found);
+        if (!found.length) {
+          send(res, 404, { ok: false, error: "没有匹配的词" });
+          return;
+        }
+        const r = deleteWords(db, { userId: user.id, terms: found.map((x) => x.lemma) });
+        if (logger) {
+          logger.info(
+            `dsh-word-vault: 页面删除 ${r.deleted.length} 个词(事件 ${r.removed.events} / 卡片 ${r.removed.cards} / 题目 ${r.removed.examQuestions} / 答题 ${r.removed.examAnswers})`,
+          );
+        }
+        send(res, 200, { ok: true, ...r, impact: found });
+        return;
+      }
+      if (sub === "/api/actions/cards") {
+        if (typeof actions.cards !== "function") {
+          send(res, 501, { ok: false, error: "当前环境不支持出卡(缺少动作实现)" });
+          return;
+        }
+        const scope = resolveScope({ group: body.group, q: body.q, sort: body.sort, limit: body.limit, highFreqMin: liveConfig.highFreqMin });
+        const r = await actions.cards({ user, ...scope });
+        send(res, r && r.ok ? 200 : 400, r || { ok: false, error: "出卡失败" });
+        return;
+      }
+      if (sub === "/api/actions/exam") {
+        if (typeof actions.exam !== "function") {
+          send(res, 501, { ok: false, error: "当前环境不支持出卷(缺少动作实现)" });
+          return;
+        }
+        const scope = resolveScope({
+          group: body.group, q: body.q, sort: "count",
+          limit: body.count || liveConfig.exam.count, highFreqMin: liveConfig.highFreqMin,
+        });
+        const r = await actions.exam({ user, ...scope, mode: body.mode === "answer" ? "answer" : "paper" });
+        send(res, r && r.ok ? 200 : 400, r || { ok: false, error: "出卷失败" });
+        return;
+      }
+      send(res, 404, { ok: false, error: "未知路径" });
+    };
+
     const disposer = webCtx.webServer.register({
       kind: "prefix",
       path: WEB_PATH,
-      handler: async (req, res) => {
-        const url = new URL(req.url || "/", "http://127.0.0.1");
-        const sub = url.pathname.slice(WEB_PATH.length) || "/";
-        try {
-          if (req.method !== "GET" && req.method !== "HEAD") {
-            send(res, 405, JSON.stringify({ ok: false, error: "只支持 GET" }), "application/json; charset=utf-8");
-            return;
-          }
-          if (sub === "/" || sub === "") {
-            send(res, 200, buildLibraryPageHtml({ userName: liveConfig.defaultUser, highFreqMin: liveConfig.highFreqMin }), "text/html; charset=utf-8");
-            return;
-          }
-          if (sub === "/api/library") {
-            const user = db.prepare("SELECT * FROM users WHERE name = ?").get(String(url.searchParams.get("user") || liveConfig.defaultUser));
-            if (!user) {
-              send(res, 404, JSON.stringify({ ok: false, error: "没有这个用户" }), "application/json; charset=utf-8");
-              return;
+      handler: (req, res) => {
+        Promise.resolve()
+          .then(() => routeHandler(req, res))
+          .catch((err) => {
+            if (logger) logger.warn(`dsh-word-vault: 词库界面出错 - ${err && err.message ? err.message : err}`);
+            try {
+              send(res, 500, { ok: false, error: String(err && err.message ? err.message : err) });
+            } catch {
+              /* 响应已发出 */
             }
-            const payload = buildLibraryPayload({
-              db, queryWords, stats, cardStats,
-              userId: user.id,
-              userName: user.name,
-              highFreqMin: liveConfig.highFreqMin,
-              group: url.searchParams.get("group") || "all",
-              q: url.searchParams.get("q") || "",
-              sort: url.searchParams.get("sort") || "count",
-              limit: Number(url.searchParams.get("limit")) || 500,
-            });
-            send(res, 200, JSON.stringify(payload), "application/json; charset=utf-8");
-            return;
-          }
-          send(res, 404, JSON.stringify({ ok: false, error: "未知路径" }), "application/json; charset=utf-8");
-        } catch (err) {
-          if (logger) logger.warn(`dsh-word-vault: 词库页面出错 - ${err && err.message ? err.message : err}`);
-          send(res, 500, JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) }), "application/json; charset=utf-8");
-        }
+          });
       },
     });
     registered = true;
-    if (logger) logger.info(`dsh-word-vault: 词库总览页已挂载 -> ${WEB_PATH}`);
+    if (logger) logger.info(`dsh-word-vault: 词库界面已挂载 -> ${WEB_PATH}`);
     // 注册即 effect:插件卸载时自动摘掉路由
     ctx.effect(() => disposer);
     return webCtx;

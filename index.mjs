@@ -317,8 +317,10 @@ export function apply(ctx, input = {}) {
     }
   });
 
-  // ---------------- P5.1 词库总览页:挂到 DSH Web 服务器的 /word-vault 路由 ----------------
+  // ---------------- P5.1/P5.2 词库界面:挂到 DSH Web 服务器的 /word-vault 路由 ----------------
   // progressive injection:没有 webServer(如 headless profile)时静默跳过,插件照常工作
+  // 动作实现复用下面的 P2/P3 助手(pickWordRows / generateAndStore / buildExamFor / persistExam 等),
+  // 这里是箭头函数体、调用发生在 apply() 之后,所以引用后文定义的 const 没问题。
   registerWebUi(ctx, {
     db: open(),
     queryWords,
@@ -326,6 +328,98 @@ export function apply(ctx, input = {}) {
     cardStats,
     liveConfig,
     logger: ctx.logger,
+    actions: {
+      /** 按页面筛选出记忆卡(缺卡片的先补生成) */
+      cards: async ({ user, status, minCount, words, orderBy, limit }) => {
+        const picked = pickWordRows({ user: user.name, status, minCount, orderBy, words, limit }, { onlyMissing: false, limit });
+        if (picked.error) return { ok: false, error: picked.error };
+        if (!picked.rows.length) return { ok: false, error: "当前筛选下没有词" };
+        const missing = picked.rows.filter((r) => !r.card_updated_at);
+        let generatedNow = 0;
+        if (missing.length) {
+          const gen = await generateAndStore(missing, picked.user, undefined);
+          generatedNow = gen.stored;
+        }
+        const idSet = new Set(picked.rows.map((r) => r.id));
+        const ready = queryWords(db, { userId: picked.user.id, kind: "word", orderBy: "count", limit: 2000 }).filter(
+          (r) => idSet.has(r.id) && r.card_updated_at,
+        );
+        if (!ready.length) return { ok: false, error: "卡片内容生成失败(可重试或换模型)", generatedNow };
+        const list = ready.map((r) => {
+          let segs = [];
+          try {
+            segs = JSON.parse(r.card_segs || "[]");
+          } catch {
+            segs = [];
+          }
+          return {
+            word: r.card_term || r.lemma,
+            phonetic: r.card_phonetic || r.phonetic || "",
+            pos: r.card_pos || r.pos || "",
+            meaning: r.card_meaning || r.meaning || "",
+            segs,
+            story: r.card_story || "",
+            seenCount: r.seen_count,
+          };
+        });
+        const stamp = new Date().toISOString().slice(5, 10);
+        const out = await exportCardSet({
+          outDir: liveConfig.outputDir,
+          stem: `词库页面-记忆卡-${stamp}`,
+          title: liveConfig.cards.title,
+          subtitle: `${picked.user.name} · ${list.length} 词 · 从词库页面导出`,
+          words: list,
+          formats: ["html", "pdf", "word"],
+          highFreqMin: liveConfig.highFreqMin,
+        });
+        return {
+          ok: true,
+          cards: list.length,
+          generatedNow,
+          highFreqCards: list.filter((w) => Number(w.seenCount) >= liveConfig.highFreqMin).length,
+          files: {
+            html: out.html && out.html.ok ? out.html.path : null,
+            pdf: out.pdf && out.pdf.ok ? out.pdf.path : null,
+            word: out.word && out.word.ok ? out.word.path : null,
+            preview: out.preview && out.preview.ok ? out.preview.path : null,
+          },
+        };
+      },
+      /** 按页面筛选出题:paper=只出打印卷,answer=出卷并起答题页 */
+      exam: async ({ user, status, minCount, words, limit, mode }) => {
+        const built = await buildExamFor({ user: user.name, status, minCount, words, count: limit, orderBy: "count" }, user, undefined);
+        if (!built.gen.questions.length) {
+          return { ok: false, error: built.gen.reason || "这个范围里没有可考的词", failures: built.gen.failures };
+        }
+        const session = persistExam(user, built.scope, built.gen);
+        const title = "英语单词测验";
+        const subtitle = `${user.name} · ${built.gen.questions.length} 题 · 来自词库页面`;
+        let url = null;
+        if (mode === "answer") {
+          const srv = await startExamServer({
+            db,
+            sessionId: session.id,
+            title,
+            subtitle,
+            logger: ctx.logger,
+            idleTimeoutMs: liveConfig.exam.minutes * 60 * 1000,
+          });
+          if (srv.ok) {
+            examServers.add(srv);
+            url = srv.url;
+          }
+        }
+        const paper = await exportExamPaper(session.id, user, title, subtitle, "pdf");
+        return {
+          ok: true,
+          sessionId: session.id,
+          questions: built.gen.questions.length,
+          url,
+          files: (paper && paper.files) || {},
+          message: url ? undefined : "打印这份试卷纸笔作答；做完在对话里让我逐题录分即可",
+        };
+      },
+    },
   });
 
   // ---------------- 工具 1:录入(对话通道,不依赖助手) ----------------
@@ -737,6 +831,7 @@ export function apply(ctx, input = {}) {
       orderBy: args.orderBy || "stale",
       includeMastered: args.includeMastered !== false,
       seed: args.seed,
+      includeWords: args.words,
     };
     const count = Math.max(1, Math.min(100, Number(args.count) || liveConfig.exam.count));
 

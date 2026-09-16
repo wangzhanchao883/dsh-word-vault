@@ -152,13 +152,15 @@ export function pickExamWords({ db, queryWords, userId, scope = {}, count = 10, 
     orderBy: scope.orderBy || "stale",
     limit: 2000,
   });
-  // 排除词(垃圾词/专名等):用户可点名不要考
-  const exclude = new Set(
-    (Array.isArray(scope.excludeWords) ? scope.excludeWords : String(scope.excludeWords || "").split(/[\s,，、]+/))
+  // 排除词(垃圾词/专名等)与指定词(页面搜索后出卷)
+  const norm = (arr) =>
+    (Array.isArray(arr) ? arr : String(arr || "").split(/[\s,，、]+/))
       .map((w) => String(w).trim().toLowerCase())
-      .filter(Boolean),
-  );
-  const usable = exclude.size ? base.filter((r) => !exclude.has(String(r.lemma).toLowerCase())) : base;
+      .filter(Boolean);
+  const exclude = new Set(norm(scope.excludeWords));
+  const include = new Set(norm(scope.includeWords));
+  let usable = exclude.size ? base.filter((r) => !exclude.has(String(r.lemma).toLowerCase())) : base;
+  if (include.size) usable = usable.filter((r) => include.has(String(r.lemma).toLowerCase()));
   const learning = usable.filter((r) => r.status !== "mastered");
   const mastered = usable.filter((r) => r.status === "mastered");
 

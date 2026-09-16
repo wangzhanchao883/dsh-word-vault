@@ -549,12 +549,101 @@ export function setStatus(db, userId, term, status) {
 }
 
 export function deleteWord(db, userId, term) {
-  const lemma = String(term).trim().toLowerCase();
-  const row = db.prepare("SELECT * FROM words WHERE user_id = ? AND lemma = ?").get(userId, lemma);
-  if (!row) return { ok: false, error: `库里没有这个词:${term}` };
-  db.prepare("DELETE FROM events WHERE word_id = ?").run(row.id);
-  db.prepare("DELETE FROM words WHERE id = ?").run(row.id);
-  return { ok: true, term: row.term };
+  const r = deleteWords(db, { userId, terms: [term] });
+  if (!r.ok) return { ok: false, error: `库里没有这个词:${term}` };
+  return { ok: true, term: r.deleted[0].term, removed: r.removed };
+}
+
+/**
+ * 删词的"影响预览":删之前先让用户看清会连带清掉什么。
+ * 不预览就删是这个项目里最容易后悔的操作(卡片、考试记录都是不可恢复的)。
+ */
+export function wordDeleteImpact(db, userId, terms) {
+  const list = (Array.isArray(terms) ? terms : [terms]).map((t) => String(t || "").trim().toLowerCase()).filter(Boolean);
+  const one = (sql) => db.prepare(sql);
+  const out = [];
+  for (const lemma of list) {
+    const row = db.prepare("SELECT * FROM words WHERE user_id = ? AND lemma = ?").get(userId, lemma);
+    if (!row) {
+      out.push({ lemma, found: false });
+      continue;
+    }
+    out.push({
+      lemma,
+      found: true,
+      id: row.id,
+      term: row.term,
+      kind: row.kind,
+      seenCount: row.seen_count,
+      status: row.status,
+      events: one("SELECT COUNT(*) AS n FROM events WHERE word_id = ?").get(row.id).n,
+      cards: one("SELECT COUNT(*) AS n FROM cards WHERE word_id = ?").get(row.id).n,
+      examQuestions: one("SELECT COUNT(*) AS n FROM exam_questions WHERE word_id = ?").get(row.id).n,
+      examAnswers: one("SELECT COUNT(*) AS n FROM exam_answers WHERE word_id = ?").get(row.id).n,
+    });
+  }
+  return out;
+}
+
+/**
+ * 批量删词(含全部连带数据)。
+ *
+ * 坑(2026-09-16 实测):老的 deleteWord 只删 events + words,而库开了 `PRAGMA foreign_keys = ON`,
+ * 于是**任何有记忆卡或考过试的词都删不掉**——SQLite 会直接抛 FOREIGN KEY constraint failed。
+ * 所以这里按外键依赖顺序清:exam_answers → exam_questions → cards → events → words。
+ *
+ * @returns {{ok:boolean, deleted:Array, missing:Array<string>, removed:{events:number,cards:number,examQuestions:number,examAnswers:number}}}
+ */
+export function deleteWords(db, { userId, terms }) {
+  const list = (Array.isArray(terms) ? terms : [terms]).map((t) => String(t || "").trim().toLowerCase()).filter(Boolean);
+  const deleted = [];
+  const missing = [];
+  const removed = { events: 0, cards: 0, examQuestions: 0, examAnswers: 0 };
+  const del = {
+    answers: db.prepare("DELETE FROM exam_answers WHERE word_id = ?"),
+    questions: db.prepare("DELETE FROM exam_questions WHERE word_id = ?"),
+    cards: db.prepare("DELETE FROM cards WHERE word_id = ?"),
+    events: db.prepare("DELETE FROM events WHERE word_id = ?"),
+    words: db.prepare("DELETE FROM words WHERE id = ?"),
+  };
+  for (const lemma of list) {
+    const row = db.prepare("SELECT * FROM words WHERE user_id = ? AND lemma = ?").get(userId, lemma);
+    if (!row) {
+      missing.push(lemma);
+      continue;
+    }
+    const a = Number(del.answers.run(row.id).changes) || 0;
+    const q = Number(del.questions.run(row.id).changes) || 0;
+    const c = Number(del.cards.run(row.id).changes) || 0;
+    const e = Number(del.events.run(row.id).changes) || 0;
+    del.words.run(row.id);
+    removed.examAnswers += a;
+    removed.examQuestions += q;
+    removed.cards += c;
+    removed.events += e;
+    deleted.push({ lemma, term: row.term, events: e, cards: c, examQuestions: q, examAnswers: a });
+  }
+  return { ok: deleted.length > 0, deleted, missing, removed };
+}
+
+/** 改词条释义(写 dict 这张全局词典缓存;同一 lemma 全库生效) */
+export function updateDictMeaning(db, { term, meaning, pos, phonetic }) {
+  const key = String(term || "").trim().toLowerCase();
+  if (!key) return { ok: false, error: "缺少 term" };
+  const at = nowIso();
+  const existing = db.prepare("SELECT * FROM dict WHERE term = ?").get(key);
+  const next = {
+    meaning: meaning === undefined ? (existing ? existing.meaning : "") : String(meaning),
+    pos: pos === undefined ? (existing ? existing.pos : "") : String(pos),
+    phonetic: phonetic === undefined ? (existing ? existing.phonetic : "") : String(phonetic),
+  };
+  db.prepare(
+    `INSERT INTO dict(term, kind, phonetic, pos, meaning, source, created_at, updated_at)
+     VALUES(?, ?, ?, ?, ?, 'manual', ?, ?)
+     ON CONFLICT(term) DO UPDATE SET phonetic = excluded.phonetic, pos = excluded.pos,
+       meaning = excluded.meaning, source = 'manual', updated_at = excluded.updated_at`,
+  ).run(key, existing ? existing.kind : "word", next.phonetic, next.pos, next.meaning, at, at);
+  return { ok: true, term: key, ...next };
 }
 
 /** 由 events 重算 seen_count / first_seen_at / last_seen_at(索引可重建性) */

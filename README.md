@@ -269,9 +269,27 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 
 非 GET/HEAD → 405；未知子路径 → 404；未知用户 → 404。
 
+### P5.2 写操作与动作按钮（已完成）
+
+| 操作 | 接口 | 说明 |
+|---|---|---|
+| 改释义 | `POST /api/word/update` | 点表格里的释义就地编辑（释义/词性/音标），写 `dict`（全局词典缓存，`source` 置为 `manual`） |
+| 手动掌握度 | `POST /api/word/mastery` | 「标已记住 / 标回没记住」，与考试判分同一套字段（`status` + `streak`） |
+| 删除预览 | `POST /api/words/delete-preview` | 先列出**会连带清掉什么**（录入记录 / 记忆卡 / 考试题 / 作答条数） |
+| 删除 | `POST /api/words/delete` | 勾选 → 弹窗确认（列出单词与影响）→ 执行；返回逐词清理回执 |
+| 出记忆卡 | `POST /api/actions/cards` | 按当前筛选（分组/搜索/排序）→ 缺卡片的先调模型补生成 → HTML/PDF/Word + 预览图 |
+| 出试卷 | `POST /api/actions/exam` `mode=paper` | 按当前筛选出题 → 题目页 + 答案页 PDF |
+| 开始答题 | `POST /api/actions/exam` `mode=answer` | 同上并起本地答题页，页面直接给可点链接（P3 那套，逐题判分回写） |
+
+**删除必须连带清理（实测坑）**：库开着 `PRAGMA foreign_keys = ON`，而旧的 `deleteWord` 只删 `events + words` —— 于是**任何有记忆卡或考过试的词都删不掉**（SQLite 直接抛 `FOREIGN KEY constraint failed`）。现在按外键依赖顺序清：`exam_answers → exam_questions → cards → events → words`，并有专门的回归测试守着。
+
+**安全**：写操作一律 `POST` + `Content-Type: application/json`（挡掉简单表单式跨站提交，缺类型回 415）；非 GET/POST 回 405；删除**必先预览影响再确认**。
+
+**页面筛选 → 查询范围**（`resolveScope`，纯函数、有单测）：`hot` = `status=learning` + `minCount=highFreqMin`；搜索词按「指定词」处理（出题侧用 `scope.includeWords`）；数量上限 200。
+
 ### 后续（未做）
 
-- **P5.2** 写操作与动作按钮：改释义、删词、批量清理（勾选删除）、按当前筛选出记忆卡 / 出试卷 / 开始答题
+- **P5.2（已完成）** 写操作与动作按钮：改释义、手动掌握度、删词（含连带清理 + 影响预览 + 弹窗确认）、按当前筛选出记忆卡/出试卷/开始答题
 - **P5.3** 使用说明页 + 设置表单（输出格式、考试范围、高频阈值、照片目录）
 - **P5.4**（可选）官方客户端半边（设置卡片），作后续增强
 
@@ -353,12 +371,12 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
 node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs
-# 113 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+# 117 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
 #        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)、
-#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5.1 词库页面(分组计数/搜索排序/HTTP 端到端)
+#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5.1/P5.2 词库页面(分组计数/搜索排序/写操作/动作/页面脚本语法自检/HTTP 端到端)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
@@ -406,7 +424,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 - **P3（已完成）** 考试闭环：英译汉单选（含该词的句子 + 单独问该词；干扰项同库同词性优先）→ 本地网页答题即时判分 → 连续 3 次答对打「已学会」、答错摘牌、已学会词 10% 抽样复查 → 可打印试卷
 - **P4（已完成）** 拍照通道：饱和色掩码 + 形状判据定位「被标记的印刷词」→ 联络图 → 模型只读印刷体入库（真实作业照片实测 p1 22 词 / p2 23 词）
 - **P5.1（已完成）** 词库总览页：挂 DSH Web 路由 `/word-vault`，统计卡 + 四组视图（全部/已记住/没记住/高频易错）+ 搜索 + 排序 + 来源列（只读）
-- **P5.2 / P5.3（待做）** 写操作与动作按钮（改释义/删词/批量清理/出卡出卷/开始答题）、使用说明与设置表单
+- **P5.3（待做）** 使用说明与设置表单（输出格式、考试范围、高频阈值、照片目录）
 
 ## 14. 版本与回滚
 
