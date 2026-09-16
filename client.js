@@ -31,6 +31,10 @@ window.__ModuleLoader__.load({
       openLibrary: "打开词库界面",
       openHelp: "使用说明",
 
+      gUsers: "用户库改名",
+      renameBtn: "改名",
+      renamed: "已改名",
+      renameHint: "改成「哥哥」「妹妹」这类好认的名字；改名后词条与录入记录都还在，弹窗点选会立刻用新名字",
       gGeneral: "通用",
       enabled: "启用插件",
       enabledHint: "关掉后不落库、不起助手进程，工具会返回停用说明",
@@ -90,6 +94,10 @@ window.__ModuleLoader__.load({
       tip: "Same configuration as the DSH settings page; changes apply immediately (the helper restarts when needed).",
       openLibrary: "Open library UI",
       openHelp: "Help",
+      gUsers: "User libraries",
+      renameBtn: "Rename",
+      renamed: "Renamed",
+      renameHint: "Give each library a recognizable name; words and history are kept",
       gGeneral: "General",
       enabled: "Enable plugin",
       dbPath: "Word database file",
@@ -139,6 +147,7 @@ window.__ModuleLoader__.load({
       ".wv-status.err{color:#c0392b}",
       ".wv-row{display:flex;gap:12px}",
       ".wv-row .wv-field{flex:1}",
+      ".wv-btn{height:30px;border:1px solid var(--dsw-alias-border-l2,#cfdbe6);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1b2a3a);border-radius:6px;padding:0 12px;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}",
       ".wv-links{display:flex;gap:8px}",
       ".wv-link{font-size:13px;text-decoration:none;color:var(--dsw-alias-label-primary,#1f5a94);border:1px solid var(--dsw-alias-border-l2,#cfdbe6);border-radius:8px;padding:6px 14px;background:var(--dsw-alias-bg-layer-1,#fff)}",
     ].join("");
@@ -168,6 +177,24 @@ window.__ModuleLoader__.load({
       return h("div", { className: "wv-field" }, h("label", null, label), children, hint ? h("div", { className: "wv-hint" }, hint) : null);
     }
 
+    /** 用户库改名:输入新名字后回车或点按钮,走宿主路由(库名与设置一起改) */
+    function RenameRow({ name, t, onRename }) {
+      const [draft, setDraft] = useState(name);
+      useEffect(() => setDraft(name), [name]);
+      const submit = () => onRename(name, draft);
+      return h("div", { className: "wv-field" },
+        h("label", null, name),
+        h("div", { className: "wv-row" },
+          h("div", { className: "wv-field" }, h("input", {
+            type: "text", value: draft,
+            onChange: (e) => setDraft(e.target.value),
+            onBlur: () => { if (draft && draft !== name) submit(); },
+            onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
+          })),
+          h("button", { className: "wv-btn", onClick: submit }, t("renameBtn"))),
+        h("div", { className: "wv-hint" }, t("renameHint")));
+    }
+
     function ConfigSection({ scope, t }) {
       const [snap, setSnap] = useState(() => scope.getSnapshot());
       const [status, setStatus] = useState({ text: "", cls: "" });
@@ -184,6 +211,21 @@ window.__ModuleLoader__.load({
       const save = (field, v) => {
         Promise.resolve(scope.set(field, v))
           .then(() => flash(t("saved"), "ok"))
+          .catch((err) => flash(`${t("error")} ${err && err.message ? err.message : String(err)}`, "err"));
+      };
+
+      const rename = (from, to) => {
+        if (!to || to === from) return;
+        fetch(WEB_PATH + "/api/users/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ from: from, to: to }),
+        })
+          .then((r) => r.json().then((data) => ({ ok: r.ok, data: data })))
+          .then((res) => {
+            if (!res.ok || res.data.ok === false) throw new Error(res.data.error || "rename failed");
+            flash(t("renamed"), "ok");
+          })
           .catch((err) => flash(`${t("error")} ${err && err.message ? err.message : String(err)}`, "err"));
       };
 
@@ -208,6 +250,9 @@ window.__ModuleLoader__.load({
           t("tip"),
           status.text ? h("span", { className: "wv-status " + status.cls, key: "st" }, " " + status.text) : null,
         ]),
+        v.users && v.users.length
+          ? group(t("gUsers"), v.users.map((u) => h(RenameRow, { key: u.name, name: u.name, t: t, onRename: rename })))
+          : null,
         group(t("gGeneral"), [
           toggle("enabled", "enabledHint"),
           text("dbPath", "text", "dbPathHint"),

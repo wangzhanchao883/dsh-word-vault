@@ -520,7 +520,7 @@ export function resolveScope({ group = "all", q = "", highFreqMin = 2, sort = "c
  *          actions?:{cards?:Function, exam?:Function}}} deps
  * @returns {boolean} 是否已注册(服务可用)
  */
-export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger, actions = {}, getSettings, writeSettings }) {
+export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfig, logger, actions = {}, getSettings, writeSettings, userOverview }) {
   let registered = false;
   ctx.inject(["webServer"], (webCtx) => {
     const send = (res, code, body, type = "application/json; charset=utf-8") => {
@@ -578,7 +578,12 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
         return;
       }
       if (!isWrite && sub === "/api/settings") {
-        send(res, 200, { ok: true, spec: SETTINGS_SPEC, values: typeof getSettings === "function" ? getSettings() : {} });
+        send(res, 200, {
+          ok: true,
+          spec: SETTINGS_SPEC,
+          values: typeof getSettings === "function" ? getSettings() : {},
+          users: typeof userOverview === "function" ? userOverview() : [],
+        });
         return;
       }
       // 把生成的文件直接从页面打开(否则用户得自己去路径里翻) —— 限定在允许的目录内
@@ -639,6 +644,17 @@ export function registerWebUi(ctx, { db, queryWords, stats, cardStats, liveConfi
       }
 
       // ---------------- 写 ----------------
+      // 改名是全局操作(不针对"当前用户"),必须放在通用用户解析之前:
+      // 否则把默认库改掉名字后,下一次请求会因为 defaultUser 不存在而 404。
+      if (sub === "/api/users/rename") {
+        if (typeof actions.renameUser !== "function") {
+          send(res, 501, { ok: false, error: "当前环境不支持改用户库名" });
+          return;
+        }
+        const r = await actions.renameUser({ from: body.from, to: body.to });
+        send(res, r && r.ok ? 200 : 400, r || { ok: false, error: "改名失败" });
+        return;
+      }
       const user = pickUser(body.user);
       if (!user) {
         send(res, 404, { ok: false, error: `没有这个用户:${body.user || liveConfig.defaultUser}` });
@@ -869,6 +885,7 @@ export function buildSettingsPageHtml() {
 <h1>设置<small>改完即时生效（录入相关项会自动重启常驻助手）</small></h1>
 ${nav("/settings")}
 <div class="result hide" id="result"></div>
+<fieldset class="form" id="users"><legend>用户库改名</legend><div class="meta" id="usersBody">加载中…</div></fieldset>
 <div id="form" class="form"><div class="meta">加载中…</div></div>
 <div class="note">
   <b>说明</b>：这些项与 DSH 原生设置页（插件配置 · dsh-word-vault）读写的是<b>同一份</b>配置，改哪边都一样。
@@ -947,11 +964,44 @@ async function openPath(p, label) {
   catch (e) { showResult('打开失败：' + esc(e.message), 'err'); }
 }
 
+/** 用户库改名:写库 + 同步设置里的用户列表(改名后弹窗点选与默认库都会跟着变) */
+function renderUsers(list) {
+  const box = document.getElementById('usersBody');
+  if (!list || !list.length) { box.innerHTML = '<div class="meta">还没有用户库。</div>'; return; }
+  box.innerHTML = list.map((u) =>
+    '<div class="frow"><label>' + esc(u.name) + '<span class="meta">（' + u.words + ' 词 / ' + u.events + ' 次录入）</span></label>' +
+    '<input type="text" data-rename="' + esc(u.name) + '" value="' + esc(u.name) + '">' +
+    '<button class="mini" data-do-rename="' + esc(u.name) + '">改名</button>' +
+    '<div class="fh meta">改成好认的名字，比如「哥哥」「妹妹」；改名后词条不会丢。</div></div>').join('');
+  box.querySelectorAll('button[data-do-rename]').forEach((b) => b.addEventListener('click', () => {
+    const from = b.dataset.doRename;
+    const input = box.querySelector('input[data-rename="' + from + '"]');
+    doRename(from, input ? input.value : '');
+  }));
+  box.querySelectorAll('input[data-rename]').forEach((el) => el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doRename(el.dataset.rename, el.value);
+  }));
+}
+
+async function doRename(from, to) {
+  try {
+    const r = await post('/api/users/rename', { from, to });
+    showResult('已把「' + esc(from) + '」改名为 <b>' + esc(r.to || to) + '</b>' +
+      (r.unchanged ? '（名字没变）' : '，词条与录入记录都还在。'), 'ok');
+    await loadAll();
+  } catch (e) { showResult('改名失败：' + esc(e.message), 'err'); }
+}
+
+async function loadAll() {
+  const r = await (await fetch(BASE + '/api/settings')).json();
+  current = r.values || {};
+  renderUsers(r.users || []);
+  render();
+}
+
 (async () => {
   try {
-    const r = await (await fetch(BASE + '/api/settings')).json();
-    current = r.values || {};
-    render();
+    await loadAll();
     document.getElementById('openOut').addEventListener('click', () => openPath(current.outputDir, '输出目录'));
     document.getElementById('openPhoto').addEventListener('click', () => openPath(current.photoDir, '照片目录'));
   } catch (e) { showResult('读取设置失败：' + esc(e.message), 'err'); }

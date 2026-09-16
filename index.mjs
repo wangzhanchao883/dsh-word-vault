@@ -41,6 +41,8 @@ import {
   getExamSession,
   listExamSessions,
   answerPositionSpread,
+  renameUser,
+  userOverview,
 } from "./db.mjs";
 import { CaptureService } from "./capture.mjs";
 import { generateCards } from "./cardgen.mjs";
@@ -332,12 +334,40 @@ export function apply(ctx, input = {}) {
     logger: ctx.logger,
     /** 页面读设置:与 DSH 原生设置页同一份(扁平结构) */
     getSettings: () => toFlat(liveConfig),
+    /** 用户库总览(改名牌用) */
+    userOverview: () => userOverview(db),
     /** 页面写设置:走宿主 settings 服务的 update(只合并 patch 到用户分节) */
     writeSettings: async (patch) => {
       if (!settingsService) throw new Error("设置服务不可用");
       return settingsService.update(SETTINGS_NS, patch);
     },
     actions: {
+      /** 用户库改名:DB 改行 + 同步设置里的用户列表与默认库(两边不同步的话工具就找不到用户) */
+      renameUser: async ({ from, to }) => {
+        const r = renameUser(db, { from, to });
+        if (!r.ok) return r;
+        if (r.unchanged) return { ...r, users: userOverview(db) };
+        const cfgUsers = Array.isArray(liveConfig.users) ? liveConfig.users : [];
+        const inConfig = cfgUsers.some((u) => u.name === String(from).trim());
+        const nextUsers = inConfig
+          ? cfgUsers.map((u) => (u.name === String(from).trim() ? { ...u, name: r.to } : u))
+          : [...cfgUsers, { name: r.to, enabled: true }];
+        const nextDefault = liveConfig.defaultUser === String(from).trim() ? r.to : liveConfig.defaultUser;
+        // 立刻改本地配置(让后续读到的就是新名字),再写回设置(触发 watch → 助手重启)
+        liveConfig = { ...liveConfig, users: nextUsers, defaultUser: nextDefault };
+        if (settingsService) {
+          try {
+            await settingsService.update(SETTINGS_NS, { users: nextUsers, defaultUser: nextDefault });
+          } catch (err) {
+            ctx.logger.warn(`dsh-word-vault: 用户库改名后写设置失败(库名已改) - ${err.message}`);
+            if (service) startService(); // 写设置失败时自己重启一次,让弹窗用上新名字
+          }
+        } else if (service) {
+          startService(); // 没有设置服务(如 headless)时自己重启
+        }
+        ctx.logger.info(`dsh-word-vault: 用户库改名 ${r.from} -> ${r.to}`);
+        return { ...r, users: userOverview(db), defaultUser: nextDefault };
+      },
       /** 按页面筛选出记忆卡(缺卡片的先补生成) */
       cards: async ({ user, status, minCount, words, orderBy, limit }) => {
         const picked = pickWordRows({ user: user.name, status, minCount, orderBy, words, limit }, { onlyMissing: false, limit });

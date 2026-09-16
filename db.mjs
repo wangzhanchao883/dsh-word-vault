@@ -646,6 +646,41 @@ export function updateDictMeaning(db, { term, meaning, pos, phonetic }) {
   return { ok: true, term: key, ...next };
 }
 
+/** 各用户库的总览(给界面用):词数 / 事件数 / 已学会数 */
+export function userOverview(db) {
+  return listUsers(db).map((u) => ({
+    id: u.id,
+    name: u.name,
+    enabled: !!u.enabled,
+    words: db.prepare("SELECT COUNT(*) AS n FROM words WHERE user_id = ? AND kind = 'word'").get(u.id).n,
+    phrases: db.prepare("SELECT COUNT(*) AS n FROM words WHERE user_id = ? AND kind = 'phrase'").get(u.id).n,
+    mastered: db.prepare("SELECT COUNT(*) AS n FROM words WHERE user_id = ? AND status = 'mastered'").get(u.id).n,
+    events: db.prepare("SELECT COUNT(*) AS n FROM events WHERE user_id = ?").get(u.id).n,
+    createdAt: u.created_at,
+  }));
+}
+
+/**
+ * 给用户库改名。
+ * 词条挂在 user_id 上,所以只改 users.name 即可;但不能和现有名字撞车(否则 findUser 会打架)。
+ * @returns {{ok:boolean, error?:string, id?:number, from?:string, to?:string}}
+ */
+export function renameUser(db, { from, to }) {
+  const oldName = String(from || "").trim();
+  const newName = String(to || "").trim();
+  if (!oldName) return { ok: false, error: "缺少原用户名" };
+  if (!newName) return { ok: false, error: "新用户名不能为空" };
+  if (newName.length > 24) return { ok: false, error: "新用户名太长（最多 24 字）" };
+  if (newName === oldName) return { ok: true, id: null, from: oldName, to: newName, unchanged: true };
+  const row = db.prepare("SELECT * FROM users WHERE name = ?").get(oldName);
+  if (!row) return { ok: false, error: `没有这个用户库:${oldName}` };
+  if (db.prepare("SELECT * FROM users WHERE name = ?").get(newName)) {
+    return { ok: false, error: `已经有一个叫「${newName}」的用户库了，换个名字吧` };
+  }
+  db.prepare("UPDATE users SET name = ? WHERE id = ?").run(newName, row.id);
+  return { ok: true, id: row.id, from: oldName, to: newName };
+}
+
 /** 由 events 重算 seen_count / first_seen_at / last_seen_at(索引可重建性) */
 export function rebuildCounters(db, userId) {
   const rows = db.prepare("SELECT id FROM words WHERE user_id = ?").all(userId);
