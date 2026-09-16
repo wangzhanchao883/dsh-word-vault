@@ -49,6 +49,7 @@ import { generateExam, buildPaperHtml, extractSentenceFromContext } from "./exam
 import { startExamServer, parseChoice, EXAM_LETTERS } from "./exam.mjs";
 import { translateWords } from "./translate.mjs";
 import { findPhotos, scanPhotos, scannerScript, photoHash, loadProgress } from "./photos.mjs";
+import { registerWebUi } from "./web.mjs";
 import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 
@@ -314,6 +315,17 @@ export function apply(ctx, input = {}) {
     } catch (err) {
       ctx.logger.warn(`dsh-word-vault: 设置命名空间注册失败,使用传入配置:${err.message}`);
     }
+  });
+
+  // ---------------- P5.1 词库总览页:挂到 DSH Web 服务器的 /word-vault 路由 ----------------
+  // progressive injection:没有 webServer(如 headless profile)时静默跳过,插件照常工作
+  registerWebUi(ctx, {
+    db: open(),
+    queryWords,
+    stats,
+    cardStats,
+    liveConfig,
+    logger: ctx.logger,
   });
 
   // ---------------- 工具 1:录入(对话通道,不依赖助手) ----------------

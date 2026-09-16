@@ -240,7 +240,42 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 
 不新建表：走既有 `events(capture_id, context)` / `captures`。因为每张照片一次 `wordvault_add`，`wordvault_fix_last({action:'undo'})` 可**整张撤销**。
 
-## 7. 数据模型（node:sqlite）
+## 7. 词库界面（P5.1）
+
+在 **DSH 自己的 Web 服务器上**挂一个只读总览页：`http://127.0.0.1:3080/word-vault`（端口随 DSH 的配置走）。
+
+**载体选择依据**（官方文档 `docs/subsystems/web-server.md`）：`ctx.webServer.register({kind:'prefix', path, handler})` 允许插件注册同源路由，因此**不需要客户端半边**——官方 cookbook 明确说客户端 bundle 必须自己复刻 loader 的 lazy-CJS 工厂产物（官方未发布该预设），成本与风险都高。同源 fetch 自带浏览器会话 cookie，鉴权沿用 DSH 既有机制。没有 `webServer` 服务时（如 headless profile）走 progressive injection **静默跳过**，插件照常工作。
+
+### 页面上有什么（P5.1 只读）
+
+| 区块 | 内容 |
+|---|---|
+| 统计卡 | 总词数 / 已记住 / 没记住 / 高频词（标记 ≥ `highFreqMin` 次）/ **高频易错** / 已有记忆卡 |
+| 四组视图 | **全部**、**已记住**（`mastered`）、**没记住**（未打已记住）、**高频易错**（标记 ≥ 阈值 **且** 未记住） |
+| 搜索 | 单词 / 词性 / 中文释义，大小写不敏感，输入即筛 |
+| 排序 | 标记次数↓（默认）、最近录入、最早录入、字母序 |
+| 表格列 | 单词（红角标「标记 N 次」+ 状态 pill）、音标、词性·释义、标记次数、状态、连对 streak、考错次数、最近出现、首见、**来源**（渠道 via + 原文片段） |
+
+**「高频易错词」口径**（用户 2026-09-16 定）：`seen_count >= highFreqMin` **且** `status != mastered` —— 反复被标记但还没学会的，就是最该优先考的。考错次数与连对数单独列出来给人看，代码不替用户加权。
+
+**来源列**的用途：`events` 没有独立 source 列，所以展示「最近一次录入的 via + context 片段」。若看到 `entities`、`monorepo`、`--flag` 这类片段，说明当时复制的不是课本内容（终端输出被当生词录进来了）—— P5.2 会提供勾选批量删除。
+
+### 路由
+
+| 路由 | 用途 |
+|---|---|
+| `GET /word-vault` | 总览页（自包含 HTML/CSS/JS，无外部资源） |
+| `GET /word-vault/api/library?group=&q=&sort=&limit=&user=` | 页面数据（JSON：统计 + 分组计数 + 行） |
+
+非 GET/HEAD → 405；未知子路径 → 404；未知用户 → 404。
+
+### 后续（未做）
+
+- **P5.2** 写操作与动作按钮：改释义、删词、批量清理（勾选删除）、按当前筛选出记忆卡 / 出试卷 / 开始答题
+- **P5.3** 使用说明页 + 设置表单（输出格式、考试范围、高频阈值、照片目录）
+- **P5.4**（可选）官方客户端半边（设置卡片），作后续增强
+
+## 8. 数据模型（node:sqlite）
 
 ```
 users(id,name,enabled,created_at)
@@ -258,7 +293,7 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 - **撤销**：删掉该次 `capture_id` 的 events，受影响词条按剩余 events 重算；不再有任何 event 的词条整条删除（即"这次新建的"）。
 - **可重建性**：`words` 是 `events` 的投影，`rebuildCounters()` 可全量重算。
 
-## 8. 配置（settings 命名空间 `dsh-word-vault`）
+## 9. 配置（settings 命名空间 `dsh-word-vault`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -299,7 +334,7 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 | `photoMinDarkSpread` | 0.45 | 裁剪块内印刷黑字至少铺开多少比例的列（剔空白边距/插图） |
 | `photoMaxPerRun` | 8 | 每次最多处理几张新照片 |
 
-## 9. 安装与重载
+## 10. 安装与重载
 
 ```powershell
 dsh plugin --profile web add D:/workout/deepseekharness/dsh-plugin/dsh-word-vault
@@ -313,17 +348,17 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 - 助手脚本改动（`scripts/capture.ps1`）：重启 DSH 会重新拉起助手即可生效。
 - 依赖：`@deepseek-ai/dsh-tools` 与 `dsh-llm` 声明为 **peerDependencies**（宿主共享包，避免插件市场"遮蔽宿主版本"告警），本机同时在 `devDependencies` 里保留，供 `npm install` 装进插件自己的 `node_modules`（link 安装不会替插件装依赖）。
 
-## 10. 测试
+## 11. 测试
 
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
-node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs
-# 103 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs
+# 113 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
 #        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)、
-#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标
+#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5.1 词库页面(分组计数/搜索排序/HTTP 端到端)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
@@ -337,7 +372,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 
 助手端到端测试**不需要人工操作**：它用 `EnumChildWindows` 找到弹窗里的按钮句柄，`SendMessage(BM_CLICK)` 真点一下，再断言命令文件；视觉测试用 `CopyFromScreen` 截图后逐像素比对颜色。
 
-## 11. 实测踩坑
+## 12. 实测踩坑
 
 > **翻译整批失败会让词「只剩词形」（2026-09-16 实测）**：照片整批录入时有两批共 51 个词全部没有释义（`ctx.llm` 调用异常被静默吞掉），连带卡都出不了。修法：`translateWords` **分批（默认 12/次）+ 未返回的词重试一轮 + 日志报出未成功的词**；事后用补翻译脚本一次性把 46 个词补齐（词典 45 → 91）。
 （都已在代码/测试里处理，改代码前务必看）
@@ -364,15 +399,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 15. `todayFor()` 一度把用户对象当名字查（`String(obj)` → `[object Object]`）→ "今日累计"恒为 0；已修并有回归测试。
 16. 反馈不能等慢操作：翻译曾在落库之前 → 弹窗长时间停在"处理中…"。现在先落库+写回执，再补翻译。
 
-## 12. 路线
+## 13. 路线
 
 - **P1（已完成）** 剪贴板 + 点选弹窗录入、对话录入、翻译落库、查询统计、撤销/改库
 - **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
 - **P3（已完成）** 考试闭环：英译汉单选（含该词的句子 + 单独问该词；干扰项同库同词性优先）→ 本地网页答题即时判分 → 连续 3 次答对打「已学会」、答错摘牌、已学会词 10% 抽样复查 → 可打印试卷
 - **P4（已完成）** 拍照通道：饱和色掩码 + 形状判据定位「被标记的印刷词」→ 联络图 → 模型只读印刷体入库（真实作业照片实测 p1 22 词 / p2 23 词）
-- **P5** 词库管理界面（浏览 / 改释义 / 删词 / 手动改标签）+ 统计（高频榜 / 最近新增 / 久未复习）
+- **P5.1（已完成）** 词库总览页：挂 DSH Web 路由 `/word-vault`，统计卡 + 四组视图（全部/已记住/没记住/高频易错）+ 搜索 + 排序 + 来源列（只读）
+- **P5.2 / P5.3（待做）** 写操作与动作按钮（改释义/删词/批量清理/出卡出卷/开始答题）、使用说明与设置表单
 
-## 13. 版本与回滚
+## 14. 版本与回滚
 
 本仓库（https://github.com/wangzhanchao883/dsh-word-vault）是插件的独立源码仓库，存在的意义就是**改炸了能回到已知可用状态**。
 

@@ -7,10 +7,11 @@ import { join } from "node:path";
 import { apply, name as pluginName, inject as pluginInject } from "../index.mjs";
 
 /** 最小假 DSH 运行时:只为验证契约(工具注册/设置命名空间/effect 生命周期) */
-function fakeRuntime({ llm } = {}) {
+function fakeRuntime({ llm, webServer } = {}) {
   const tools = new Map();
   const effects = [];
   const settingsNamespaces = [];
+  const routes = [];
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   const ctx = {
     logger,
@@ -19,8 +20,11 @@ function fakeRuntime({ llm } = {}) {
       effects.push(disposer);
       return () => {};
     },
+    // progressive injection 的真实语义:只有服务存在时才回调(没有 webServer 的 headless 环境不该被调用)
     inject(names, cb) {
-      cb(ctx);
+      const list = Array.isArray(names) ? names : [names];
+      if (list.includes("webServer") && !webServer) return;
+      cb(list.includes("webServer") ? { ...ctx, webServer } : ctx);
     },
     get(key) {
       return key === "llm" ? llm : undefined;
@@ -38,7 +42,7 @@ function fakeRuntime({ llm } = {}) {
       },
     },
   };
-  return { ctx, tools, effects, settingsNamespaces, logger };
+  return { ctx, tools, effects, settingsNamespaces, routes, logger };
 }
 
 function tempDir() {
@@ -288,6 +292,35 @@ test("P2 工具链路:无卡片时 export 自动补生成;生成失败给出可�
     const bad = JSON.parse(await rt2.tools.get("wordvault_export_cards").execute({ user: "用户1", format: "html" }, exec));
     assert.equal(bad.ok, false);
     assert.match(String(bad.message), /生成失败/);
+  } finally {
+    cleanup(dir2, rt2.effects);
+  }
+});
+
+// ---------------------------------------------------------------- P5 词库页面
+
+test("P5:有 webServer 时挂载 /word-vault 路由;没有时静默跳过", () => {
+  const routes = [];
+  const webServer = { register: (r) => { routes.push(r); return () => {}; } };
+
+  const dir = tempDir();
+  const rt = fakeRuntime({ webServer });
+  try {
+    apply(rt.ctx, { dbPath: join(dir, "words.db"), helper: { enabled: false } });
+    assert.equal(routes.length, 1, "应注册一条路由");
+    assert.equal(routes[0].kind, "prefix");
+    assert.equal(routes[0].path, "/word-vault");
+    assert.equal(typeof routes[0].handler, "function");
+  } finally {
+    cleanup(dir, rt.effects);
+  }
+
+  // headless(没有 webServer)时不该报错
+  const dir2 = tempDir();
+  const rt2 = fakeRuntime();
+  try {
+    apply(rt2.ctx, { dbPath: join(dir2, "words.db"), helper: { enabled: false } });
+    assert.equal(rt2.effects.length, 1, "插件照常加载(只有生命周期 effect)");
   } finally {
     cleanup(dir2, rt2.effects);
   }
