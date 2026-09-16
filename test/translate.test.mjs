@@ -74,3 +74,22 @@ test("重复词只翻一次", async () => {
   const map = await translateWords({ llm, provider: "p", model: "m", words: [{ term: "w01" }, { term: "W01" }, { term: " w01 " }], batchSize: 10 });
   assert.equal(map.size, 1);
 });
+
+test("模型调用默认关闭推理(实测:推理 token 会挤占输出预算且更慢)", async () => {
+  const { collectText } = await import("../translate.mjs");
+  const seen = [];
+  const fakeLlm = {
+    stream(options) {
+      seen.push(options);
+      async function* gen() {
+        yield { type: "text-delta", index: 0, text: "ok" };
+        yield { type: "finish", reason: { kind: "stop" } };
+      }
+      return gen();
+    },
+  };
+  await collectText(fakeLlm, { provider: "p", model: "m", messages: [] });
+  assert.equal(seen[0].reasoningEffort, "off", "默认应为 off");
+  await collectText(fakeLlm, { provider: "p", model: "m", messages: [], reasoningEffort: "high" });
+  assert.equal(seen[1].reasoningEffort, "high", "显式指定时应被尊重");
+});

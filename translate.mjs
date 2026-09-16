@@ -84,8 +84,13 @@ export function parseTranslateOutput(text) {
 
 /** 流式取回完整文本(记忆卡生成模块也复用它) */
 export async function collectText(llm, options, signal) {
+  // 翻译 / 出卡 / 出题都是"照规则干活",不需要思考链。
+  // 实测教训(2026-09-16):宿主模型带推理(High)时,推理 token 会挤占 maxTokens,
+  // 6 个词 4500 预算被推理吃光 -> JSON 没输出 -> 全部报"模型未返回该词";
+  // 而且推理明显更慢。DSH 支持 off|low|high|max,这里默认 off,调用方可用 options.reasoningEffort 覆盖。
+  const opts = options && options.reasoningEffort ? options : { ...options, reasoningEffort: "off" };
   let out = "";
-  for await (const chunk of llm.stream({ ...options, signal })) {
+  for await (const chunk of llm.stream({ ...opts, signal })) {
     if (!chunk || typeof chunk !== "object") continue;
     if (chunk.type === "text-delta" && typeof chunk.text === "string") out += chunk.text;
     if (chunk.type === "finish" && chunk.reason && chunk.reason.kind === "error") {
