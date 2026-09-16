@@ -102,6 +102,13 @@ export class CaptureService {
   }
 
   spawnHelper() {
+    // 用户按钮以数据库为准:设置里的用户列表可能滞后(改名后靠它避免弹窗还显示旧名字)
+    let dbUsers = null;
+    try {
+      dbUsers = this.db.prepare("SELECT name, enabled FROM users ORDER BY id").all().map((u) => ({ name: u.name, enabled: !!u.enabled }));
+    } catch {
+      dbUsers = null;
+    }
     configToFile(this.helperCfgPath, helperConfig(this.config, {
       queuePath: this.queuePath,
       statusPath: this.statusPath,
@@ -110,7 +117,7 @@ export class CaptureService {
       promptPath: this.promptPath,
       triggerPath: this.triggerPath,
       debugPath: this.debugPath,
-    }, false));
+    }, false, dbUsers));
     try {
       this.child = spawn(
         POWERSHELL,

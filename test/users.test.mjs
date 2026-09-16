@@ -6,10 +6,57 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, renameUser, userOverview } from "../db.mjs";
+import { openDb, closeDb, ensureUser, recordEntries, queryWords, stats, cardStats, renameUser, userOverview, listUsers } from "../db.mjs";
 import { registerWebUi, WEB_PATH } from "../web.mjs";
+import { helperConfig } from "../config.mjs";
+import { apply } from "../index.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** 用最小假运行时 apply 一次插件(只为验证 open() 的建用户语义),返回 db/用户列表/dispose */
+function fakeApply(dbPath, cfg = {}) {
+  const effects = [];
+  let shared = null;
+  const handle = () => {
+    if (!shared) shared = openDb(dbPath);
+    return shared;
+  };
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    effect(fn) {
+      effects.push(fn());
+      return () => {};
+    },
+    inject(names, cb) {
+      const list = Array.isArray(names) ? names : [names];
+      if (list.includes("webServer") || list.includes("settings")) return; // 这两个服务不提供
+      cb(ctx);
+    },
+    get: () => undefined,
+    tools: { register: () => () => {} },
+  };
+  apply(ctx, { dbPath, helper: { enabled: false }, ...cfg });
+  return {
+    get db() {
+      return handle();
+    },
+    users: () => listUsers(handle()).map((u) => u.name),
+    userOverview: () => userOverview(handle()),
+    dispose: () => {
+      if (shared) {
+        closeDb(shared);
+        shared = null;
+      }
+      for (const d of effects) {
+        try {
+          if (typeof d === "function") d();
+        } catch {
+          /* 已释放 */
+        }
+      }
+    },
+  };
+}
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "wv-user-"));
@@ -140,6 +187,39 @@ test("改名片:经 HTTP 端到端,并同步设置里的用户列表与默认库
     closeDb(s.db);
     rmSync(s.dir, { recursive: true, force: true });
   }
+});
+
+test("回归:库里有用户时,不再按配置里的旧名字造空壳用户", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wv-open-"));
+  const dbPath = join(dir, "words.db");
+  let rt = null;
+  try {
+    rt = fakeApply(dbPath, { users: [{ name: "用户1" }, { name: "用户2" }], defaultUser: "用户1" });
+    assert.deepEqual(rt.users().sort(), ["用户1", "用户2"]);
+    const db = openDb(dbPath);
+    renameUser(db, { from: "用户1", to: "王石头" });
+    closeDb(db);
+    assert.deepEqual(rt.users().sort(), ["王石头", "用户2"]);
+    rt.dispose();
+
+    // 配置里仍是旧名字 -> 不得再建出 用户1 的空壳
+    rt = fakeApply(dbPath, { users: [{ name: "用户1" }, { name: "用户2" }], defaultUser: "用户1" });
+    assert.deepEqual(rt.users().sort(), ["王石头", "用户2"], "不该按旧配置重建空壳用户");
+  } finally {
+    if (rt) rt.dispose();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 120 });
+  }
+});
+
+test("助手配置:用户按钮以数据库为准(设置滞后也不显示旧名字)", () => {
+  const dbUsers = [{ name: "王石头", enabled: true }, { name: "王展超", enabled: false }];
+  const cfg = { defaultUser: "用户1", users: [{ name: "用户1", enabled: true }, { name: "用户2", enabled: true }], helper: { watchImages: false } };
+  const paths = { queuePath: "q", statusPath: "s", resultPath: "r", commandPath: "c", promptPath: "p", triggerPath: "t", debugPath: "d" };
+  assert.deepEqual(helperConfig(cfg, paths, false).users.map((u) => u.name), ["用户1", "用户2"], "没传 DB 用户时退回配置");
+  const after = helperConfig(cfg, paths, false, dbUsers);
+  assert.deepEqual(after.users.map((u) => u.name), ["王石头", "王展超"], "传了 DB 用户就用它");
+  assert.equal(after.users[1].enabled, false);
+  assert.deepEqual(helperConfig(cfg, paths, false, []).users.map((u) => u.name), ["用户1", "用户2"], "空数组退回配置");
 });
 
 test("原生设置面板:有用户库改名分组,并调用同一个宿主路由", () => {

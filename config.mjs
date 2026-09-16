@@ -240,7 +240,7 @@ export function resolveConfig(input = {}) {
  * @param {{queuePath:string,statusPath:string,resultPath:string,commandPath:string,triggerPath:string,debugPath:string}} paths
  * @param {boolean} debug
  */
-export function helperConfig(config, paths, debug = false) {
+export function helperConfig(config, paths, debug = false, users = null) {
   return {
     queuePath: paths.queuePath,
     statusPath: paths.statusPath,
@@ -265,6 +265,7 @@ export function helperConfig(config, paths, debug = false) {
     floatAutoHide: config.helper.floatAutoHide,
     debug,
     ui: UI_TEXT,
-    users: config.users.map((u) => ({ name: u.name, enabled: u.enabled })),
+    // 弹窗里的用户按钮以**数据库**为准(设置里的用户列表可能滞后,改名后靠它避免显示旧名字)
+    users: (Array.isArray(users) && users.length ? users : config.users).map((u) => ({ name: u.name, enabled: u.enabled })),
   };
 }

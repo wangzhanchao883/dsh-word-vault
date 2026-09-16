@@ -243,12 +243,27 @@ export function apply(ctx, input = {}) {
 
   const runtimeDir = () => join(dirname(liveConfig.dbPath), "word-vault-runtime");
 
-  /** 打开库并建用户(幂等) */
+  /**
+   * 打开库。
+   *
+   * 关键:用户库以**数据库为准**——只有空库(首次运行)才按配置里的用户列表建。
+   * 早先是每次 open() 都按配置 ensureUser,于是设置里一残留旧名字(例如改过名的用户),
+   * 就会在库里重新建出**空壳用户**(实测:改名后重启 DSH,库里多出两个 0 词的同名壳)。
+   */
   const open = () => {
     if (db) return db;
     db = openDb(liveConfig.dbPath);
-    for (const u of liveConfig.users) ensureUser(db, u.name, "", u.enabled);
-    ensureUser(db, liveConfig.defaultUser, "", true);
+    const existing = listUsers(db);
+    if (!existing.length) {
+      for (const u of liveConfig.users) ensureUser(db, u.name, "", u.enabled);
+      ensureUser(db, liveConfig.defaultUser, "", true);
+      return db;
+    }
+    // 库里有用户了:只做一致性兜底(默认库不存在时退到第一个)
+    if (!existing.some((u) => u.name === liveConfig.defaultUser)) {
+      ctx.logger.warn(`dsh-word-vault: 默认用户「${liveConfig.defaultUser}」在库里不存在,本次改用「${existing[0].name}」`);
+      liveConfig = { ...liveConfig, defaultUser: existing[0].name };
+    }
     return db;
   };
 
@@ -360,11 +375,10 @@ export function apply(ctx, input = {}) {
             await settingsService.update(SETTINGS_NS, { users: nextUsers, defaultUser: nextDefault });
           } catch (err) {
             ctx.logger.warn(`dsh-word-vault: 用户库改名后写设置失败(库名已改) - ${err.message}`);
-            if (service) startService(); // 写设置失败时自己重启一次,让弹窗用上新名字
           }
-        } else if (service) {
-          startService(); // 没有设置服务(如 headless)时自己重启
         }
+        // 必须显式重启助手:实测改名后 settings 的 watch 不一定触发,而弹窗的用户按钮是助手进程渲染的
+        if (service) startService();
         ctx.logger.info(`dsh-word-vault: 用户库改名 ${r.from} -> ${r.to}`);
         return { ...r, users: userOverview(db), defaultUser: nextDefault };
       },
