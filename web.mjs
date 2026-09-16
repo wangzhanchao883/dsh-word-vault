@@ -829,6 +829,9 @@ a.navlink.on { background:var(--blue); border-color:var(--blue); color:#fff; fon
  * 只列用户真正会改的项;值从插件当前配置读(扁平结构),写回同一份 settings schema。
  */
 export const SETTINGS_SPEC = [
+  { key: "enabled", group: "通用", label: "启用插件", type: "bool", help: "关掉后不落库、不起助手进程，工具会返回停用说明。" },
+  { key: "dbPath", group: "通用", label: "词库数据库文件", type: "text", help: "SQLite 单文件；不在插件仓库里，回滚代码不会动你的词。" },
+  { key: "outputDir", group: "通用", label: "产物输出目录", type: "text", help: "记忆卡 / 试卷 / 预览图都落在这里。" },
   { key: "highFreqMin", group: "复习口径", label: "高频词门槛（被标记几次算高频）", type: "int", min: 1, max: 20, help: "累计被录入/被标记达到这个次数就算高频；「高频易错」= 高频且尚未记住。" },
   { key: "maxWordsPerCapture", group: "录入", label: "单次录入最多收多少词", type: "int", min: 1, max: 500, help: "防止一次复制长文把词库灌满。" },
   { key: "keepPhrases", group: "录入", label: "2~5 词短句另存为「词组」", type: "bool", help: "关掉则只收单词，不收词组条目。" },
@@ -837,6 +840,7 @@ export const SETTINGS_SPEC = [
   { key: "promptTimeoutMs", group: "录入", label: "弹窗等待上限（毫秒）", type: "int", min: 0, max: 300000, help: "超时自动消失且不入库；0 = 一直等。" },
   { key: "showFloatWindow", group: "录入", label: "显示常驻监听小条", type: "bool", help: "小条可拖动并记忆位置。" },
   { key: "cardsTitle", group: "记忆卡", label: "卡片页眉主标题", type: "text" },
+  { key: "cardsSubtitle", group: "记忆卡", label: "页眉副标题（留空自动生成）", type: "text" },
   { key: "cardsBatchSize", group: "记忆卡", label: "每次交给模型几个词做拆词", type: "int", min: 1, max: 20 },
   { key: "examCount", group: "考试", label: "默认出多少题", type: "int", min: 1, max: 100 },
   { key: "examRecheckRatio", group: "考试", label: "已学会词抽查比例", type: "number", min: 0, max: 1, help: "抽查答错会自动摘牌。" },

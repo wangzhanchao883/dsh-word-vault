@@ -11,6 +11,7 @@
   },
   "files": [
     "index.mjs",
+    "client.js",
     "config.mjs",
     "words.mjs",
     "db.mjs",
@@ -30,6 +31,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {

@@ -310,6 +310,24 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 
 **路径类字段**：设置页底部给「📁 打开输出目录 / 📁 打开照片目录」两个按钮，直接调系统默认程序打开，省得手打路径。
 
+### P5.4 原生设置页面板（客户端半边，已完成）
+
+用户要求「设置也参考其他插件，弄个界面出来，类似截图这种」——即 **DSH 原生设置页 · 插件配置分区**里的自定义面板。参照本机可用的 `dsh-study-notebook/client.js` 实现，照它的模式手写一个客户端半边（**无构建步骤、无 JSX**）：
+
+| 要点 | 做法 |
+|---|---|
+| 产物形态 | 经典脚本注册到 `window.__ModuleLoader__.load({ id, factory })`，工厂内 `require("react")`，一律 `React.createElement` |
+| 注册槽位 | `ctx.slots.inject("settings.section", …)` + `slots.register({ name:"settings.section", id:"word-vault", order:300, label:()=>t("nav"), locale, inject })`——`label()` 就是左侧入口文字 |
+| 读写设置 | `ctx.settingsScope.bind({ namespace: "dsh-word-vault" })` → `getSnapshot()` / `set(field, value)` / `subscribe()`。**`set` 只支持单段路径**，这正是两个插件 host 侧 schema 都用扁平结构的原因；分组只是客户端的展示结构 |
+| 主题 | 配色全部用 DSH 主题变量（`--dsw-alias-label-primary` / `--dsw-alias-border-l2` / `--dsw-alias-bg-layer-1|2` / `--dsw-alias-label-tertiary` / `--dsw-alias-state-business-primary`），跟随明暗主题；括号里给降级色便于离线预览 |
+| 生命周期 | 样式与词典都通过 `ctx.effect(…, "dsh-word-vault: styles|dictionaries")` 注册，插件卸载自动摘除 |
+| 保存语义 | 文本/数字本地草稿，失焦或回车提交；开关立即提交；右上角短暂提示「已保存 / 保存失败」 |
+| 打包声明 | `package.json` 里 `exports["./client"] = "./client.js"` + `dsh.client = { platform:"web", inject:[dsh-client-locale, dsh-client-runtime, dsh-client-ui-settings] }`（与参照插件逐字一致） |
+
+面板分组：**通用**（启用插件 / 词库数据库 / 产物输出目录）、**录入**（不点选入库 / 常驻小条 / 自动翻译 / 词组 / 弹窗超时 / 单次上限）、**复习口径**（高频门槛）、**记忆卡**（标题 / 副标题 / 批大小）、**考试**（题量 / 抽查比例 / 空闲关闭）、**照片**（照片目录 / 裁剪输出 / 保留裁剪 / 饱和度 / 上扩像素 / 每次限流）；底部两个快捷入口跳到 `/word-vault` 与 `/word-vault/help`。
+
+**两套界面，一份配置**：原生面板与宿主页 `/word-vault/settings` 读写同一份 settings 命名空间（`SETTINGS_SPEC` 与客户端面板字段**必须一致**，有测试守着——这条守卫第一次运行就抓出了 `cardsSubtitle` 漏登记）。
+
 ### 后续（未做）
 
 - **P5.2（已完成）** 写操作与动作按钮：改释义、手动掌握度、删词（含连带清理 + 影响预览 + 弹窗确认）、按当前筛选出记忆卡/出试卷/开始答题
@@ -393,13 +411,14 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
-node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs
-# 122 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs test/client.test.mjs
+# 126 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
 #        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
 #        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)、
-#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5.1/P5.2 词库页面(分组计数/搜索排序/写操作/动作/页面脚本语法自检/HTTP 端到端)
+#        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5 词库页面(分组计数/搜索排序/写操作/动作/页面脚本语法自检/HTTP 端到端)、
+#        使用说明页与设置表单(P5.3)、客户端设置面板(P5.4:内核契约/字段一致性守卫/主题变量)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
 # 17 项断言:剪贴板入队、弹窗出现、真实点击「用户1」→ commit、成功反馈+今日累计+自动消失、
