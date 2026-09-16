@@ -1,6 +1,6 @@
 {
   "name": "dsh-word-vault",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "英语生词库 · 多用户单词助手:拖选双击Ctrl/F9 秒录生词、拍照标记词识别、LLM 翻译落 SQLite,按录入时间/出现次数/已学会维度出趣味记忆卡(Word/HTML/PDF)并支持英译汉单选考试闭环。",
   "type": "module",
   "main": "index.mjs",
