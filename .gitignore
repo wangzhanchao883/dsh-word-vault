@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# npm pack artifacts (package-lock.json IS committed on purpose: exact restore point)
+*.tgz
+
+# runtime protocol files (never part of the source tree)
+capture-queue.jsonl
+capture-commands.jsonl
+capture-result.json
+capture-status.json
+capture-prompt.json
+capture-trigger.txt
+capture-debug.log
+chip-pos.json
+word-vault-runtime/
+
+# local scratch / diagnostics
+*.log
+_t*.txt
+_*.txt
+_tmp/

@@ -1,0 +1,5 @@
+# dsh-word-vault bundle patch layer.
+# 安装本包到 profile 后,host 端加载主入口(生词库落库/翻译/查询工具 + 常驻热键录入助手 + 设置命名空间)。
+- insert:
+    - id: dsh-word-vault
+      name: dsh-word-vault
