@@ -1,6 +1,6 @@
 {
   "name": "dsh-word-vault",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "英语生词库 · 多用户单词助手：复制即弹窗点选录入、拍照识别标记词、LLM 翻译落 SQLite，按出现次数/掌握度出趣味记忆卡（每块带真实 IPA 音标）与考试闭环",
   "type": "module",
   "main": "index.mjs",
@@ -93,5 +93,6 @@
   "bugs": {
     "url": "https://github.com/wangzhanchao883/dsh-word-vault/issues"
   },
-  "author": "wangzhanchao883"
+  "author": "wangzhanchao883",
+  "screenshots": "screenshots.json"
 }
