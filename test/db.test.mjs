@@ -3,25 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  openDb,
-  closeDb,
-  ensureUser,
-  listUsers,
-  findUser,
-  upsertDict,
-  getDict,
-  recordEntries,
-  queryWords,
-  stats,
-  setStatus,
-  deleteWord,
-  rebuildCounters,
-  getCapture,
-  listCaptures,
-  undoCapture,
-  reassignCapture,
-} from "../db.mjs";
+import { openDb, closeDb, ensureUser, listUsers, findUser, upsertDict, getDict, recordEntries, queryWords, stats, setStatus, deleteWord, rebuildCounters, getCapture, listCaptures, undoCapture, reassignCapture, upsertCard, getCard } from "../db.mjs";
 
 function tempDb() {
   const dir = mkdtempSync(join(tmpdir(), "wordvault-"));
@@ -267,4 +249,23 @@ test("改库:从用户1挪到用户2,原库清空、新库命中", () => {
     closeDb(db);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("故事锁:重生成卡片时保留原 story,只更新事实字段;newStory 才换", () => {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), "wv-lock-")), "w.db"));
+  const u = ensureUser(db, "u1");
+  recordEntries(db, { userId: u.id, entries: [{ term: "potato", lemma: "potato" }], kind: "hotkey", via: "clipboard", context: "potato" });
+  const row = queryWords(db, { userId: u.id, limit: 5 })[0];
+  upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", phonetic: "/pəˈteɪtoʊ/", pos: "n.", meaning: "土豆", segs: [{ en: "po", cn: "破" }], story: "第一版故事" });
+  // 重生成(默认):事实字段更新,故事保留
+  const r2 = upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", phonetic: "/pəˈteɪtoʊ/", pos: "n.", meaning: "马铃薯", segs: [{ en: "po", cn: "破" }, { en: "ta", cn: "塔" }], story: "第二版故事(不该出现)" });
+  const got = getCard(db, u.id, row.id);
+  assert.equal(got.story, "第一版故事", "默认必须保留原故事");
+  assert.equal(r2.storyLocked, true);
+  assert.equal(got.meaning, "马铃薯", "事实字段仍要更新");
+  assert.match(got.segs, /ta/, "拆解块仍要更新");
+  // 显式换梗
+  upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", meaning: "马铃薯", segs: [{ en: "po", cn: "破" }], story: "第三版故事", newStory: true });
+  assert.equal(getCard(db, u.id, row.id).story, "第三版故事", "newStory 时应换");
+  closeDb(db);
 });

@@ -446,16 +446,26 @@ export function queryWords(db, filter = {}) {
  * 写/更新一张记忆卡。同一 (user, word) 只有一张,重复生成即覆盖(便于"只重做某几个词")。
  * @returns {{ok:boolean, created:boolean, wordId:number}}
  */
-export function upsertCard(db, { userId, wordId, term, phonetic = "", pos = "", meaning = "", segs = [], story = "", model = "", source = "llm" }) {
+/**
+ * 写卡片。
+ *
+ * **故事锁(2026-09-16 用户要求)**:重生成卡片时默认**保留库里已有的 story**(荒诞梗)。
+ * 原因:同一个词每次重生成都换一版梗,孩子记不住("不利于记忆");梗应该首次定稿后固定下来。
+ * 想换梗要显式传 newStory: true;想连事实字段都不动就别调用这个函数。
+ */
+export function upsertCard(db, { userId, wordId, term, phonetic = "", pos = "", meaning = "", segs = [], story = "", model = "", source = "llm", keepStory = true, newStory = false }) {
   const at = nowIso();
   const segsJson = JSON.stringify(Array.isArray(segs) ? segs : []);
-  const existing = db.prepare("SELECT id FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId);
+  const existing = db.prepare("SELECT id, story FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId);
+  // 故事锁:已有卡片且没要求换梗 -> 沿用旧 story(其余事实字段照常更新)
+  const lockedStory = existing && keepStory && !newStory && existing.story ? existing.story : null;
+  const finalStory = lockedStory || story;
   if (existing) {
     db.prepare(
       `UPDATE cards SET term = ?, phonetic = ?, pos = ?, meaning = ?, segs = ?, story = ?, model = ?, source = ?, updated_at = ?
        WHERE id = ?`,
-    ).run(term, phonetic, pos, meaning, segsJson, story, model, source, at, existing.id);
-    return { ok: true, created: false, wordId };
+    ).run(term, phonetic, pos, meaning, segsJson, finalStory, model, source, at, existing.id);
+    return { ok: true, created: false, wordId, storyLocked: !!lockedStory };
   }
   db.prepare(
     `INSERT INTO cards(user_id, word_id, term, phonetic, pos, meaning, segs, story, model, source, created_at, updated_at)
