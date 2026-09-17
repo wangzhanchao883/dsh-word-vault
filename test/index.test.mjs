@@ -222,9 +222,10 @@ function cardFakeLlm(segMap) {
 }
 
 const SEGS = {
-  map: [{ en: "ma", cn: "马" }, { en: "p", cn: "铺" }],
-  plant: [{ en: "plan", cn: "普兰" }, { en: "t", cn: "特" }],
-  tomato: [{ en: "to", cn: "特" }, { en: "ma", cn: "马" }, { en: "to", cn: "头" }],
+  // 每段都带 ipa,且拼起来正好等于整词音标(/map/ 等)——否则会被段音标闸门判不合格
+  map: [{ en: "ma", cn: "马", ipa: "/ma/" }, { en: "p", cn: "铺", ipa: "/p/" }],
+  plant: [{ en: "plan", cn: "普兰", ipa: "/plan/" }, { en: "t", cn: "特", ipa: "/t/" }],
+  tomato: [{ en: "to", cn: "特", ipa: "/to/" }, { en: "ma", cn: "马", ipa: "/ma/" }, { en: "to", cn: "头", ipa: "/to/" }],
 };
 
 test("P2 工具链路:make_cards 生成并入库 → export_cards 出 HTML", async () => {

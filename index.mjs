@@ -403,7 +403,7 @@ export function apply(ctx, input = {}) {
             translated = t.size;
           }
         }
-        const missing = picked.rows.filter((r) => !r.card_updated_at);
+        const missing = picked.rows.filter((r) => cardNeedsWork(r)); // 含"有卡片但缺音标"的老卡片
         let generatedNow = 0;
         let genFailures = [];
         if (missing.length) {
@@ -697,6 +697,24 @@ export function apply(ctx, input = {}) {
     user: { type: "string", description: "用户库,缺省默认用户" },
   };
 
+  /**
+   * 卡片是否需要补生成:
+   * ① 根本没有卡片 ② 有卡片但**拆解块缺音标**(用户要求"所有单词卡都带音标训读",
+   *    加音标功能之前生成的老卡片属于这种)
+   * 注意:补生成走 upsertCard 的默认故事锁 -> 只会补上音标,不会改掉已定稿的荒诞梗。
+   */
+  const hasSegIpa = (row) => {
+    if (!row || !row.card_segs) return false;
+    try {
+      const segs = JSON.parse(row.card_segs);
+      if (!Array.isArray(segs) || !segs.length) return false;
+      return segs.every((s) => s && String(s.ipa || "").trim());
+    } catch {
+      return false;
+    }
+  };
+  const cardNeedsWork = (row) => !row.card_updated_at || !hasSegIpa(row);
+
   const pickWordRows = (args, { onlyMissing = false, limit = 8 } = {}) => {
     const wanted = args.user || liveConfig.defaultUser;
     const user = findUser(db, wanted);
@@ -721,7 +739,7 @@ export function apply(ctx, input = {}) {
       );
       rows = rows.filter((r) => want.has(r.lemma));
     }
-    if (onlyMissing) rows = rows.filter((r) => !r.card_updated_at);
+    if (onlyMissing) rows = rows.filter((r) => cardNeedsWork(r));
     const total = rows.length;
     return { user, rows: rows.slice(0, Math.max(1, limit)), total };
   };
