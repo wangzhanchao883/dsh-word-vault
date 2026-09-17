@@ -4,6 +4,16 @@
 
 ---
 
+## 界面预览 / Screenshots
+
+| 词库总览 / Library | 记忆卡（每块带 IPA）/ Cards |
+| --- | --- |
+| ![library](https://raw.githubusercontent.com/wangzhanchao883/dsh-word-vault/main/assets/screenshots/01-library.png) | ![cards](https://raw.githubusercontent.com/wangzhanchao883/dsh-word-vault/main/assets/screenshots/02-cards.png) |
+| **在线答题 / Quiz** | **原生设置面板 / Settings** |
+| ![exam](https://raw.githubusercontent.com/wangzhanchao883/dsh-word-vault/main/assets/screenshots/03-exam.png) | ![settings](https://raw.githubusercontent.com/wangzhanchao883/dsh-word-vault/main/assets/screenshots/04-settings.png) |
+
+> 四张图分别对应：词库总览、记忆卡（每块上排真实音标 / 下排中文谐音 + 规律小字）、
+> 在线答题（四选项、连对 3 次标记已学会）、DSH 原生设置面板。
 ## 1. 录入（P1 已交付两条通道）
 
 | 通道 | 触发 | 取词 | 常驻进程 |

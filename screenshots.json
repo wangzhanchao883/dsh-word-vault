@@ -1,0 +1,18 @@
+[
+  {
+    "path": "assets/screenshots/01-library.png",
+    "caption": "词库总览：用户切换、分组、动作面板与词条表 / Library overview"
+  },
+  {
+    "path": "assets/screenshots/02-cards.png",
+    "caption": "记忆卡：每块上排真实 IPA、下排中文谐音 / Cards with per-chunk IPA"
+  },
+  {
+    "path": "assets/screenshots/03-exam.png",
+    "caption": "在线答题：四选项单选题 / Interactive quiz"
+  },
+  {
+    "path": "assets/screenshots/04-settings.png",
+    "caption": "原生设置面板：DSH 设置页里的「英语生词库」/ Native settings panel"
+  }
+]
