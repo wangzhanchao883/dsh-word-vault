@@ -45,8 +45,13 @@ export function buildCardPrompt(items) {
     "",
     "=== 其他 ===",
     "H. 只输出 JSON 数组，不要解释文字、不要 markdown 代码块。",
-    'I. 每项格式:{"word":"原词小写","phonetic":"/音标/","pos":"词性缩写","meaning":"中文释义(不超过12字)","segs":[{"en":"字母片段","cn":"中文音"}],"story":"一句话荒诞梗"}',
+    'I. 每项格式:{"word":"原词小写","phonetic":"/音标/","pos":"词性缩写","meaning":"中文释义(不超过12字)","segs":[{"en":"字母片段","cn":"中文音","ipa":"/该块音标/","note":"可选规律小字"}],"story":"一句话荒诞梗"}',
     "J. segs 的 en 按顺序拼接必须**恰好等于原词**(不能多字母、不能少字母、不能改字母)。",
+    "M. **每块必须给该块的真实音标 ipa**(用 / / 包住,如 /rɪ/)。把各块 ipa 按顺序拼起来、去掉重音符号后,必须≈整词音标——这是硬要求。",
+    "   反例(不合格): potato 的 ta 块写 /tə/(应为 /teɪ/)   regression 的三块拼不出 /rɪɡreʃn/",
+    "N. note 只在**字母组合有明确规律**时给,≤12 字,例如: ght→'gh 不发音'、tion→'读 /ʃən/'、ph→'读 /f/'、kn→'k 不发音'、wr→'w 不发音'、sion→'读 /ʃən/'。",
+    "   没有明显规律就留空字符串 \"\"(不要硬编规律)。",
+    "O. 音标拿不准时:ipa 可以留空字符串,但**绝不编造**;若给了 known_phonetic 必须沿用。",
     "K. 音标拿不准就留空字符串，**绝不编造**；若给了 known_phonetic/known_meaning 就沿用。",
     "L. word 必须与输入完全一致(小写)。",
     "",
@@ -98,7 +103,7 @@ export function validateCard(raw, expectedWord) {
   const qualityIssues = [];
   const word = clean(raw && raw.word).toLowerCase() || String(expectedWord || "").toLowerCase();
   const segs = (Array.isArray(raw && raw.segs) ? raw.segs : [])
-    .map((s) => ({ en: clean(s && s.en), cn: clean(s && s.cn) }))
+    .map((s) => ({ en: clean(s && s.en), cn: clean(s && s.cn), ipa: clean(s && s.ipa), note: clean(s && s.note) }))
     .filter((s) => s.en && s.cn);
 
   const joined = segs.map((s) => s.en).join("").toLowerCase();
@@ -113,6 +118,22 @@ export function validateCard(raw, expectedWord) {
     }
     const longCn = segs.filter((s) => s.cn.length > 2).length;
     if (longCn) qualityIssues.push(`有 ${longCn} 个中文音超过 2 字`);
+    // 段音标闸门:格式合法 + 拼起来能回到整词音标(用户要求"保证准确性")
+    const IPA_OK = /^\/[A-Za-zɪʊəɜɔæʌɛθðʃʒŋɡɑɒɜːˈˌ\s.\-]+\/$/;
+    const strip = (x) => String(x || "").replace(/[\/\sˈˌ:ː.]/g, "").toLowerCase();
+    const badIpa = segs.filter((s) => s.ipa && !IPA_OK.test(s.ipa));
+    if (badIpa.length) issues.push(`有 ${badIpa.length} 个段音标格式不合法:${badIpa.map((s) => s.ipa).join("、")}`);
+    const segIpa = segs.map((s) => s.ipa).filter(Boolean);
+    if (segIpa.length === segs.length && clean(raw && raw.phonetic)) {
+      const a = strip(segIpa.join(""));
+      const b = strip(clean(raw && raw.phonetic));
+      // 允许 ±2 字符差异(重音/弱读写法差异),超过就认为拼不回去
+      if (!a || !b || Math.abs(a.length - b.length) > 2 || (a !== b && !a.includes(b) && !b.includes(a))) {
+        issues.push(`段音标拼不回整词:${segIpa.join("")} vs ${clean(raw && raw.phonetic)}`);
+      }
+    }
+    const longNote = segs.filter((s) => s.note && s.note.length > 14).length;
+    if (longNote) qualityIssues.push(`有 ${longNote} 个规律小字超过 14 字`);
   }
 
   let phonetic = clean(raw && raw.phonetic);

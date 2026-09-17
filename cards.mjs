@@ -114,6 +114,15 @@ body {
   font-family: "Segoe UI", Arial, sans-serif;
   font-size: 10.5pt; font-weight: 700; color: #1f5a94; line-height: 1.05;
 }
+.seg .ipa {
+  display: block; margin-bottom: .2mm;
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 7.6pt; font-weight: 600; color: #5b7a99; line-height: 1.05;
+}
+.seg .note {
+  display: block; margin-top: .3mm;
+  font-size: 6.2pt; color: #8798a8; line-height: 1.1;
+}
 .seg .cn {
   display: block; margin-top: .4mm;
   font-size: 8.5pt; font-weight: 700; color: #c0392b; line-height: 1.05;
@@ -186,7 +195,7 @@ function freqBadge(w, highFreqMin) {
 /** 一张卡（四层结构） */
 export function renderCard(w, idx, opts = {}) {
   const segs = (Array.isArray(w.segs) ? w.segs : [])
-    .map((s) => `<div class="seg"><span class="en">${escapeHtml(s.en)}</span><span class="cn">${escapeHtml(s.cn)}</span></div>`)
+    .map((s) => `<div class="seg">${s.ipa ? `<span class="ipa">${escapeHtml(s.ipa)}</span>` : ""}<span class="en">${escapeHtml(s.en)}</span><span class="cn">${escapeHtml(s.cn)}</span>${s.note ? `<span class="note">${escapeHtml(s.note)}</span>` : ""}</div>`)
     .join("");
   const meaning = `${escapeHtml(w.pos || "")} ${escapeHtml(w.meaning || "")}`.trim();
   const wd = String(w.word || "");
