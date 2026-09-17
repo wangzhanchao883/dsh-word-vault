@@ -1,7 +1,7 @@
 {
   "name": "dsh-word-vault",
   "version": "1.0.0",
-  "description": "英语生词库 · 多用户单词助手:拖选双击Ctrl/F9 秒录生词、拍照标记词识别、LLM 翻译落 SQLite,按录入时间/出现次数/已学会维度出趣味记忆卡(Word/HTML/PDF)并支持英译汉单选考试闭环。",
+  "description": "英语生词库 · 多用户单词助手：复制即弹窗点选录入、拍照识别标记词、LLM 翻译落 SQLite，按出现次数/掌握度出趣味记忆卡（每块带真实 IPA 音标）与考试闭环",
   "type": "module",
   "main": "index.mjs",
   "exports": {
@@ -76,7 +76,20 @@
     "word",
     "sqlite",
     "hotkey",
-    "exam"
+    "exam",
+    "flashcards",
+    "ipa",
+    "phonics",
+    "spaced-repetition"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangzhanchao883/dsh-word-vault.git"
+  },
+  "homepage": "https://github.com/wangzhanchao883/dsh-word-vault#readme",
+  "bugs": {
+    "url": "https://github.com/wangzhanchao883/dsh-word-vault/issues"
+  },
+  "author": "wangzhanchao883"
 }
