@@ -1,6 +1,6 @@
 {
   "name": "dsh-word-vault",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "英语生词库 · 多用户单词助手：复制即弹窗点选录入、拍照识别标记词、LLM 翻译落 SQLite，按出现次数/掌握度出趣味记忆卡（每块带真实 IPA 音标）与考试闭环",
   "type": "module",
   "main": "index.mjs",
@@ -45,20 +45,21 @@
   },
   "scripts": {
     "check": "node --check index.mjs && node --check config.mjs && node --check words.mjs && node --check db.mjs && node --check translate.mjs && node --check capture.mjs",
-    "test": "node --test test/"
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "test": "node --test \"test/*.test.mjs\""
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2"
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4.0.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
     "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
       "optional": true
     }
   },

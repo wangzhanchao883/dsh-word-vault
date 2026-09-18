@@ -7,25 +7,33 @@
  * - 明显不是生词的标签类词(Tel/E-mail 等)走 NOT_WORDS 黑名单,P4 再叠加词表校验。
  */
 
-/** 功能词:不作为生词入库(用户可在设置里追加,见 config.extraStopwords) */
+/**
+ * 功能词:不作为生词入库(用户可在设置里追加,见 config.extraStopwords)
+ *
+ * 2026-09-17 用户口径:起步学习阶段,卷面/课本上被红笔标出的功能词也必须能入库。
+ * 因此从本表移除 which / here / each,并从 NOT_WORDS 移除 class(见下方注释)。
+ */
 export const STOPWORDS = new Set([
   "a", "an", "the", "and", "or", "but", "so", "if", "then", "than", "as", "because", "while", "when",
-  "where", "why", "how", "what", "which", "who", "whom", "whose", "that", "this", "these", "those",
-  "there", "here", "is", "am", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+  "where", "why", "how", "what", "who", "whom", "whose", "that", "this", "these", "those",
+  "there", "is", "am", "are", "was", "were", "be", "been", "being", "do", "does", "did",
   "done", "have", "has", "had", "having", "will", "would", "shall", "should", "can", "could", "may",
   "might", "must", "not", "no", "yes", "of", "in", "on", "at", "to", "for", "from", "by", "with",
   "about", "into", "over", "under", "after", "before", "up", "down", "out", "off", "again", "very",
-  "too", "also", "just", "only", "all", "any", "both", "each", "few", "more", "most", "other",
+  "too", "also", "just", "only", "all", "any", "both", "few", "more", "most", "other",
   "some", "such", "own", "same", "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
   "us", "them", "my", "your", "his", "its", "our", "their", "mine", "yours", "hers", "ours",
   "theirs", "myself", "yourself", "himself", "herself", "itself", "ourselves", "themselves", "s",
   "t", "re", "ve", "ll", "d", "m", "let", "get", "got", "one", "two",
 ]);
 
-/** 非词汇:印刷体但不是生词(样张里 Tel:/E-mail: 就是这类),避免污染库 */
+/**
+ * 非词汇:印刷体但不是生词(样张里 Tel:/E-mail: 就是这类),避免污染库
+ * 2026-09-17:去掉 class —— 课本上的 class 是七年级真实生词(班级),红笔标了就该收。
+ */
 export const NOT_WORDS = new Set([
   "tel", "telephone", "email", "e", "fax", "http", "https", "www", "com", "cn", "net", "org",
-  "mr", "mrs", "ms", "dr", "unit", "starter", "section", "page", "grade", "class", "name", "date",
+  "mr", "mrs", "ms", "dr", "unit", "starter", "section", "page", "grade", "name", "date",
   "time", "score", "total", "answer", "answers", "question", "questions", "word", "words",
   "english", "chinese", "reading", "listening", "writing", "speaking", "exercise", "exercises",
 ]);
