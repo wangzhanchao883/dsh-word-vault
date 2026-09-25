@@ -14,6 +14,20 @@
 
 > 四张图分别对应：词库总览、记忆卡（每块上排真实音标 / 下排中文谐音 + 规律小字）、
 > 在线答题（四选项、连对 3 次标记已学会）、DSH 原生设置面板。
+
+## 环境要求（先看这条）
+
+- **本版（1.0.3）对应 DSH 0.1.7 及以上**（本机实测 0.1.7-rc.2）。DSH 0.1.7 换了设置契约
+  （浏览器端 `settingsScope` → `configForms`），本版的设置面板是按新契约重写的。
+- **DSH 0.1.5 及更早装本版会这样**（实测结论）：
+  - 工具、词库、`/word-vault` 页面、常驻助手**照常可用**；
+  - **设置面板不会出现**——0.1.5 的浏览器端没有 `configForms` 这个服务，插件声明的客户端半边
+    会停在 `pending`，左侧看不到「英语生词库」这一项；
+  - 只想在 0.1.5 上用，就装上一版：`dsh plugin --profile web add dsh-word-vault@1.0.2`。
+- **从插件市场装完、配置界面显示异常**：先**重启一次 DSH**。市场会把它当临时条目热挂载
+  （条目 id 带 `mkt-` 前缀），那个条目的设置命名空间和本插件硬写的 `dsh-word-vault` 对不上；
+  重启后由 bundle 层加载，就正常了。
+
 ## 1. 录入（P1 已交付两条通道）
 
 | 通道 | 触发 | 取词 | 常驻进程 |
@@ -416,6 +430,8 @@ cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,cr
 | `photoMaxPerRun` | 8 | 每次最多处理几张新照片 |
 
 ## 10. 安装与重载
+
+> 版本要求（**DSH 0.1.7 及以上**）与在更老 DSH 上的具体表现，见文首「环境要求（先看这条）」。
 
 ```powershell
 dsh plugin --profile web add D:/workout/deepseekharness/dsh-plugin/dsh-word-vault
