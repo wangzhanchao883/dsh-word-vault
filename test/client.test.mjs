@@ -74,7 +74,8 @@ function loadClientBundle() {
       },
       bind: () => (key) => key,
     },
-    settingsScope: { bind: (opts) => ({ namespace: opts.namespace }) },
+    // 0.1.7:settingsScope 已整个移除,换成 configForms;get(entryId) 的入参是条目 id
+    configForms: { get: (entryId) => ({ namespace: entryId }) },
     slots,
   };
   const exported = mod.factory(requireFn);
@@ -106,7 +107,7 @@ function collectLabels(node, out = []) {
 test("客户端半边:契约正确(导出/注入/槽位/副作用都用 effect 注册)", () => {
   const { exported, registrations, effects, dictionaries } = loadClientBundle();
   assert.equal(exported.name, "dsh-word-vault");
-  assert.deepEqual(exported.inject, ["slots", "locale", "settingsScope"]);
+  assert.deepEqual(exported.inject, ["slots", "locale", "configForms"]);
 
   // 样式与词典都必须是 effect(注册即 effect,插件卸载自动摘除)
   assert.equal(effects.length, 2, "应有样式与词典两个 effect");
@@ -124,8 +125,8 @@ test("客户端半边:契约正确(导出/注入/槽位/副作用都用 effect �
   assert.equal(entry.descriptor.label(), "nav", "label 应走 locale(桩 t 恒等)");
   assert.equal(typeof entry.descriptor.inject, "function");
   const injected = entry.descriptor.inject();
-  assert.ok(injected.scope, "应注入 settingsScope");
-  assert.equal(injected.scope.namespace, "dsh-word-vault", "命名空间必须与 host 侧一致");
+  assert.ok(injected.scope, "应注入 configForms 表单");
+  assert.equal(injected.scope.namespace, "dsh-word-vault", "条目 id 必须与 host 侧设置命名空间一致");
   assert.equal(typeof entry.Component, "function");
 });
 
@@ -165,15 +166,18 @@ test("客户端半边:面板按分组渲染,且带上说明与两个入口", () 
   assert.equal(loading.props.className, "wv-tip");
 });
 
-test("客户端半边:package.json 声明 ./client 与 dsh.client(照参照插件写法)", () => {
+test("客户端半边:package.json 声明 ./client 与 dsh.client(0.1.7 的包名清单)", () => {
   const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   assert.equal(pkg.exports["./client"], "./client.js");
   assert.equal(pkg.dsh.client.platform, "web");
+  // 0.1.7:configForms 由 @deepseek-ai/dsh-client-ui-settings 提供,locale 仍在;
+  // @deepseek-ai/dsh-client-runtime 自 0.1.5 起就没再发布过(npm latest 停在 0.0.1-rc.1),
+  // 前端对未知包名是静默跳过,留着只是隐患 —— 所以从这个清单里删掉。
   assert.deepEqual(pkg.dsh.client.inject, [
     "@deepseek-ai/dsh-client-locale",
-    "@deepseek-ai/dsh-client-runtime",
     "@deepseek-ai/dsh-client-ui-settings",
   ]);
+  assert.ok(!pkg.dsh.client.inject.includes("@deepseek-ai/dsh-client-runtime"), "不要加回从不存在的包");
   assert.ok(pkg.files.includes("client.js"), "client.js 要在 files 白名单里");
   const src = readFileSync(clientPath, "utf8");
   assert.ok(src.includes("window.__ModuleLoader__.load"), "必须是经典脚本形式的 loader 产物");

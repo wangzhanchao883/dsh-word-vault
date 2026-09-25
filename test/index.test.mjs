@@ -4,13 +4,13 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { apply, name as pluginName, inject as pluginInject } from "../index.mjs";
+import { apply, name as pluginName, inject as pluginInject, Config } from "../index.mjs";
 
-/** 最小假 DSH 运行时:只为验证契约(工具注册/设置命名空间/effect 生命周期) */
+/** 最小假 DSH 运行时:只为验证契约(工具注册/设置读写/effect 生命周期) */
 function fakeRuntime({ llm, webServer } = {}) {
   const tools = new Map();
   const effects = [];
-  const settingsNamespaces = [];
+  const settingsCalls = { describe: 0, update: [] };
   const routes = [];
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   const ctx = {
@@ -35,14 +35,19 @@ function fakeRuntime({ llm, webServer } = {}) {
         return () => {};
       },
     },
+    // DSH 0.1.7 的设置服务只提供 describe()(读)与 update()(写);
+    // 旧契约的 register()/scope.get()/scope.watch() 已被整个移除,不要再往这里加回来。
     settings: {
-      register(ns, schema, opts) {
-        settingsNamespaces.push({ ns, schema, opts });
-        return { get: () => null, watch: () => {} };
+      describe() {
+        settingsCalls.describe += 1;
+        return [];
+      },
+      async update(ns, patch) {
+        settingsCalls.update.push({ ns, patch });
       },
     },
   };
-  return { ctx, tools, effects, settingsNamespaces, routes, logger };
+  return { ctx, tools, effects, settingsCalls, routes, logger };
 }
 
 function tempDir() {
@@ -71,7 +76,43 @@ test("插件契约:name/inject/apply 齐全", () => {
   assert.equal(typeof apply, "function");
 });
 
-test("注册 13 个工具 + 设置命名空间 + effect 生命周期", () => {
+/**
+ * DSH 0.1.7 的两条硬要求(实测自 @deepseek-ai/dsh-settings 的 write()):
+ *   1. 没导出 Config → settings.update() 抛 `No configurable plugin entry "<id>"`;
+ *   2. 某个要写的字段没标 .volatile() → 抛 `Config field "<path>" is not volatile`。
+ * 这条测试就是那两条的守卫 —— 漏标一个字段,设置页那一项就会保存失败。
+ */
+test("0.1.7 契约:导出 Config,且所有可写字段都标了 .volatile()", () => {
+  // schemastery 的 schema 是**函数**(带 toJSON),不是普通对象
+  assert.ok(Config, "index.mjs 必须导出 Config");
+  assert.ok("toJSON" in Config, "Config 必须是 schemastery schema(dsh-settings 的 schema(entry) 要求有 toJSON)");
+  const notVolatile = [];
+  const walk = (node, path) => {
+    if (node == null) return;
+    if (node.meta && node.meta.volatile) return; // 该节点整棵子树都 volatile
+    if (node.type === "object" && node.dict) {
+      for (const [key, child] of Object.entries(node.dict)) walk(child, [...path, key]);
+      return;
+    }
+    notVolatile.push(path.join("."));
+  };
+  walk(Config, []);
+  assert.deepEqual(notVolatile, [], `这些字段没标 .volatile(),写入会被宿主拒绝:${notVolatile.join(", ")}`);
+});
+
+test("0.1.7 契约:扁平 Config 入口(DSH 按 Config 校验后传给 apply 的就是这种形态)", async () => {
+  const dir = tempDir();
+  const rt = fakeRuntime();
+  try {
+    apply(rt.ctx, { dbPath: join(dir, "words.db"), helperEnabled: false, autoTranslate: false });
+    const msg = await rt.tools.get("wordvault_capture_clipboard").execute({}, {});
+    assert.match(msg, /剪贴板助手未启用/, "扁平入口的 helperEnabled=false 必须生效");
+  } finally {
+    cleanup(dir, rt.effects);
+  }
+});
+
+test("注册 13 个工具 + 读设置 + effect 生命周期", () => {
   const dir = tempDir();
   const rt = fakeRuntime();
   try {
@@ -91,8 +132,8 @@ test("注册 13 个工具 + 设置命名空间 + effect 生命周期", () => {
       "wordvault_scan_photo",
       "wordvault_status",
     ]);
-    assert.equal(rt.settingsNamespaces.length, 1);
-    assert.equal(rt.settingsNamespaces[0].ns, "dsh-word-vault");
+    // 0.1.7:不再注册设置命名空间,改为 settings 服务就绪后 describe() 读一次当前值
+    assert.ok(rt.settingsCalls.describe >= 1, "应通过 settings.describe() 读取当前配置");
     assert.equal(rt.effects.length, 1);
     assert.equal(typeof rt.effects[0], "function");
     // 卸载 disposer 不应抛错

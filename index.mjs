@@ -61,10 +61,22 @@ export const inject = ["tools"];
 const SETTINGS_NS = "dsh-word-vault";
 
 /**
- * 扁平 schema:settings 客户端的 set(field, value) 只支持单段路径,
- * 所以把 users / helper / words 拍平,host 侧再映射回插件结构。
+ * `.volatile()` 由 schemastery ≥3.18.4 提供(DSH 0.1.7 起用它标记"可在设置表单里编辑"
+ * 的字段;0.1.5 自带的 3.18.2 没有这个方法)。旧版上直接调用会在**模块加载期**抛
+ * `volatile is not a function`、整个插件起不来,所以这里降级为原样返回 ——
+ * 代价只是旧 DSH 上没有设置表单,其余功能照常。
  */
-const settingsSchema = z.object({
+const vol = (schema) => (typeof schema.volatile === "function" ? schema.volatile() : schema);
+
+/**
+ * 插件配置字段表。
+ *
+ * 用表驱动而不是逐字段手写 `.volatile()`,是因为 `dsh-settings` 的 `write()` 对任何
+ * 没标 volatile 的字段直接抛 `Config field "<path>" is not volatile` —— 漏标一处,
+ * 那一项设置就永远保存不上,而且只在用户点保存时才暴露。集中标记一处,漏标在结构上
+ * 不可能发生(有单测守着)。
+ */
+const CONFIG_FIELDS = {
   enabled: z.boolean().default(DEFAULT_CONFIG.enabled),
   dbPath: z.string().default(DEFAULT_CONFIG.dbPath),
   wordsDir: z.string().default(DEFAULT_CONFIG.wordsDir),
@@ -112,7 +124,30 @@ const settingsSchema = z.object({
   photoMaxCropH: z.number().min(40).max(600).default(DEFAULT_CONFIG.photo.maxCropH),
   photoMinDarkSpread: z.number().min(0).max(1).default(DEFAULT_CONFIG.photo.minDarkSpread),
   photoMaxPerRun: z.number().min(1).max(50).default(DEFAULT_CONFIG.photo.maxPerRun),
-});
+};
+
+/**
+ * 插件配置 schema(DSH 0.1.7 契约)。
+ *
+ * 0.1.7 起,插件的配置表单由**本 schema** 派生:运行时直接读 Loader 条目的
+ * `runtime.Config`(见 `@deepseek-ai/dsh-settings` 的 `schema(entry)`),设置命名空间
+ * 就是 profile 条目 id(本插件 = `dsh-word-vault`,见 cordis.patch.yml)。
+ * 旧契约的 `settings.register(ns, schema, {base})` / `scope.get()` / `scope.watch()`
+ * 已被整体移除,照旧写会在**写入时**抛错。
+ *
+ * 两条硬要求(实测 `dsh-settings` 的 `write()`):
+ *   1. 必须导出本 `Config`,否则 `settings.update(ns, patch)` 抛
+ *      `No configurable plugin entry "<id>"`;
+ *   2. 每个要写的字段必须标 `.volatile()`,否则抛
+ *      `Config field "<path>" is not volatile`。
+ *
+ * 结构保持**扁平**是接口约定而不仅是历史原因:客户端面板的
+ * `configForms.set(field, value)` 与设置页的表单键都按一级键读写,`toFlat` / `fromFlat`
+ * 负责与插件内部的嵌套结构互转。
+ */
+export const Config = z.object(
+  Object.fromEntries(Object.entries(CONFIG_FIELDS).map(([key, schema]) => [key, vol(schema)])),
+);
 
 /** 插件嵌套结构 → 扁平 settings 结构 */
 function toFlat(config) {
@@ -220,6 +255,20 @@ function fromFlat(flat) {
   });
 }
 
+/**
+ * 配置入口归一化。
+ *
+ * 本插件的 `Config`(见文件开头)是**扁平**结构,所以 DSH 组合时传给 `apply` 的
+ * `input` 也是扁平的;而插件内部一律用嵌套结构(见 `config.mjs`)。这里统一转一次。
+ * 调用方直接给嵌套结构(单测、外部嵌入)也认 —— 判据是出现了 `helper` / `cards` /
+ * `exam` / `photo` / `words` 这些只存在于嵌套结构的键。
+ */
+function normalizeConfigInput(input) {
+  if (!input || typeof input !== "object") return {};
+  const nested = input.helper || input.cards || input.exam || input.photo || input.words;
+  return nested ? input : fromFlat(input);
+}
+
 /** 统一走这个构造函数:纯文本工具(返回值即 JSON/文本,渲染为文本卡片) */
 function textTool(definition) {
   return defineTool({
@@ -237,7 +286,7 @@ function json(value) {
 }
 
 export function apply(ctx, input = {}) {
-  let liveConfig = resolveConfig(input);
+  let liveConfig = resolveConfig(normalizeConfigInput(input));
   let db = null;
   let service = null;
 
@@ -317,23 +366,34 @@ export function apply(ctx, input = {}) {
     };
   });
 
-  // ---------------- 设置命名空间:等 settings 服务就绪后注册 ----------------
+  // ---------------- 设置(DSH 0.1.7 契约) ----------------
+  // 0.1.7 移除了 `settings.register(ns, schema, {base})` / `scope.get()` / `scope.watch()`:
+  // 表单 schema 改由插件导出的 `Config` 派生(见文件开头),命名空间 = profile 条目 id,
+  // 读取口是 `settings.describe()`,写入口是 `settings.update(ns, patch)`(命名空间相同)。
+  // 因此这里只做两件事:拿到服务、按需重读当前生效值。
   let settingsService = null; // 页面写设置要用(宿主 settings 服务的 update)
-  ctx.inject(["settings"], (settingsCtx) => {
+
+  /**
+   * 重新读取当前生效的配置(替代旧契约的 `scope.get()` 与 `scope.watch()`)。
+   * 拿不到就保持传入配置 —— 与旧版「settings 服务不在就跳过命名空间」同样的降级语义。
+   * @returns {boolean} 是否成功读到
+   */
+  function syncFromSettings() {
+    if (!settingsService) return false;
     try {
-      settingsService = settingsCtx.settings;
-      const scope = settingsCtx.settings.register(SETTINGS_NS, settingsSchema, { base: toFlat(liveConfig) });
-      const resolved = scope.get();
-      if (resolved) liveConfig = fromFlat(resolved);
-      scope.watch((next) => {
-        if (!next) return;
-        liveConfig = fromFlat(next);
-        if (liveConfig.enabled) startService();
-        else stopService();
-      });
+      const row = settingsService.describe().find((it) => it && it.ns === SETTINGS_NS);
+      if (!row || row.value === undefined || row.value === null) return false;
+      liveConfig = resolveConfig(normalizeConfigInput(row.value));
+      return true;
     } catch (err) {
-      ctx.logger.warn(`dsh-word-vault: 设置命名空间注册失败,使用传入配置:${err.message}`);
+      ctx.logger.warn(`dsh-word-vault: 读取设置失败(继续用传入配置) - ${err.message}`);
+      return false;
     }
+  }
+
+  ctx.inject(["settings"], (settingsCtx) => {
+    settingsService = settingsCtx.settings;
+    syncFromSettings();
   });
 
   // ---------------- P5.1/P5.2 词库界面:挂到 DSH Web 服务器的 /word-vault 路由 ----------------
@@ -351,10 +411,15 @@ export function apply(ctx, input = {}) {
     getSettings: () => toFlat(liveConfig),
     /** 用户库总览(改名牌用) */
     userOverview: () => userOverview(db),
-    /** 页面写设置:走宿主 settings 服务的 update(只合并 patch 到用户分节) */
+    /** 页面写设置:走宿主 settings 服务的 update(只合并 patch 到用户分节),写完立刻重读 */
     writeSettings: async (patch) => {
       if (!settingsService) throw new Error("设置服务不可用");
-      return settingsService.update(SETTINGS_NS, patch);
+      await settingsService.update(SETTINGS_NS, patch);
+      // 0.1.7 已无 scope.watch:写后主动重读,并按新值决定常驻助手要不要跟着起停
+      if (syncFromSettings()) {
+        if (liveConfig.enabled) startService();
+        else stopService();
+      }
     },
     actions: {
       /** 用户库改名:DB 改行 + 同步设置里的用户列表与默认库(两边不同步的话工具就找不到用户) */

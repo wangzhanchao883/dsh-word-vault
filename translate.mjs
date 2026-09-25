@@ -6,7 +6,16 @@
  */
 import { randomUUID } from "node:crypto";
 
-export const PLUGIN_SOURCE = { kind: "plugin", plugin: "dsh-word-vault" };
+/**
+ * 消息生产者身份。
+ *
+ * DSH 的会话格式 v4 取消了 catch-all 的 `kind: "plugin"`,要求每个生产者声明自己的
+ * kind,第三方统一用 `plugin:<包名>`。**本文件这几处消息只喂给
+ * `ctx.llm.stream({ messages })` 当临时提示词,不写进会话**,所以 v4 的准入门禁
+ * (发生在会话事件采纳阶段)本来也不会校验它们 —— 改过来是为了在两条路径上保持
+ * 同一身份,避免以后被误判成"插件注入内容"。
+ */
+export const PLUGIN_SOURCE = { kind: "plugin:dsh-word-vault", form: "instructions" };
 
 /**
  * 消息构造:优先用官方 createUserMessage(带稳定 MessageId 与冻结),

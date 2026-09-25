@@ -3,8 +3,10 @@
  * 不能用 JSX(无构建步骤),一律 React.createElement。
  * 与 dsh-study-notebook / dsh-screenshot-capture 的 client.js 同款模式:
  *   - 槽位 settings.section,id 决定左侧入口,label() 是入口文字
- *   - 读写走 ctx.settingsScope.bind({namespace});scope.set(field, value) 只支持单段路径,
- *     所以 host 侧 schema 保持扁平,分组只是本文件的展示结构
+ *   - 读写走 ctx.configForms.get(entryId);getSnapshot()/subscribe()/set(field, value)
+ *     与旧契约的 settingsScope 同名同义:只是入参从 bind({namespace}) 变成 get(entryId),
+ *     快照结构({status,value,base,user,revision,writable,mode})与读写签名都没变。
+ *     (0.1.7 把 ctx.settingsScope 整个移除,换成了 configForms)
  *   - 配色一律用 DSH 主题变量(--dsw-alias-*),跟随明暗主题;括号里给降级色,便于离线预览
  */
 window.__ModuleLoader__.load({
@@ -297,7 +299,10 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-word-vault: dictionaries");
 
       const t = ctx.locale.bind(NS);
-      const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE });
+      // 0.1.7:settingsScope 已整个移除,换成 configForms;get(entryId) 的入参是
+      // profile 条目 id(不再需要 bind({namespace})),返回值的 getSnapshot()/subscribe()/set()
+      // 与旧 scope 同名同义。
+      const scope = ctx.configForms.get(SETTINGS_NAMESPACE);
       const injected = () => ({ scope });
 
       ctx.slots.inject("settings.section", () =>
@@ -317,7 +322,7 @@ window.__ModuleLoader__.load({
 
     module.exports = {
       name: "dsh-word-vault",
-      inject: ["slots", "locale", "settingsScope"],
+      inject: ["slots", "locale", "configForms"],
       apply,
     };
     return module.exports;
