@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 本文件记录本项目所有值得注意的改动。格式参考 Keep a Changelog,版本号遵循语义化版本。
 
+## [1.0.4] - 2026-09-29
+
+### Changed / 变更
+
+- **兼容 DSH 0.2 / DSH 0.2 compatibility.** 本机在 `0.2.0-rc.1` 实测通过,**无代码变更**,只改
+  `peerDependencies` 两个条目。
+  - `@deepseek-ai/dsh-llm` 与 `@deepseek-ai/dsh-tools` 由 `^0.1.1-rc.2`
+    （等价于 `>=0.1.1-rc.2 <0.2.0-0`）改为
+    `>=0.1.1-rc.2 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`。
+  - 原因：DSH 门禁比的是**整个 DSH 的版本号**（与 peer 里写的那个子包实际装哪版无关）。
+    旧上界把 0.2.0 的全部预发布排除掉,插件在 0.2.0 的 `plugin add` 阶段被直接
+    `installation rejected`；0.1.7 只是启动期 `skipping`,0.2.0 提前成安装期硬拒。
+  - **必须显式写预发布分支**：node-semver 只放行「范围内存在同一 `major.minor.patch` 元组、
+    且自身带预发布标签的比较符」的预发布版本,故 `>=0.2.0-rc.1 <0.3.0-0` 必须显式列出,
+    否则 `0.2.0-rc.1` 会被静默漏掉。
+  - **实测结论**：改后可在 `0.2.0-rc.1` 上装入并激活,host 工具、词库、`/word-vault` 页面与
+    浏览器端设置面板（`configForms`）均正常；0.1.7 上行为不变。
+
 ## [1.0.3] - 2026-09-25
 
 ### Fixed / 修复
