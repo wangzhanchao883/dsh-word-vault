@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 本文件记录本项目所有值得注意的改动。格式参考 Keep a Changelog,版本号遵循语义化版本。
 
+## [1.0.5] - 2026-10-02
+
+**发布通道迁移 —— 无代码变更、无行为变更。**
+
+改用 npm Trusted Publishing（GitHub Actions + OIDC）发布，不再依赖任何长期令牌。
+本版本用于验证新的发布链路，并让该版本带上 provenance（可验证的来源证明）。
+
 ## [1.0.4] - 2026-09-29
 
 ### Changed / 变更
