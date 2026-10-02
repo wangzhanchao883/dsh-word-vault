@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 本文件记录本项目所有值得注意的改动。格式参考 Keep a Changelog,版本号遵循语义化版本。
 
+## [1.0.6] - 2026-10-02
+
+### Fixed / 修复
+
+- **npm 包里漏了 `scripts/photo-scan.ps1`,拍照通道在实装版必失败。** 1.0.5 的
+  `package.json > files` 白名单里只有 `scripts/capture.ps1`(而 tag `v1.0.5` 的 git 树里
+  **是**有 `scripts/photo-scan.ps1` 的,属于打包漏放行,不是文件后补),于是 `npm i` 装出来的
+  包里 `scripts/` 只剩一个脚本,`wordvault_scan_photo` 一调用就报
+  「扫描器脚本不存在:…\node_modules\dsh-word-vault\scripts\photo-scan.ps1」。
+  - 修法:`files` 改为放行整个 `scripts/` 目录,不再逐个文件列白名单。
+  - 影响面:**所有 npm 装法**(含实装校验用的 profile)拍照通道全废;GitHub 直装不受影响;
+    剪贴板通道正常(`capture.ps1` 一直在包里)。
+
+### Added / 新增
+
+- **发版闸门 `test/pack.test.mjs`:** 直接跑 `npm pack --dry-run --json`,断言 `scripts/` 下每个
+  脚本 + 全部运行时必需文件都在打包清单里。仓库内测试发现不了「仓库里有、npm 包里没有」
+  (1.0.5 的 `test/photos.test.mjs` 只断言仓库里存在该文件,照样绿),只有打包清单能发现。
+
 ## [1.0.5] - 2026-10-02
 
 **发布通道迁移 —— 无代码变更、无行为变更。**
