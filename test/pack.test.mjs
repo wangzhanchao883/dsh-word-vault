@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -85,6 +85,21 @@ test("打包闸门:运行时必需文件都在包里", (t) => {
   ];
   for (const f of required) {
     assert.ok(files.includes(f), `${f} 必须在 npm 包里(实装运行时要用)`);
+  }
+});
+
+test("打包闸门:README 里嵌入的图(相对路径)必须在包里", (t) => {
+  const files = requirePack(t);
+  if (!files) return;
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  // 只查相对路径的 ![alt](target):绝对 URL(GitHub raw 那种)与打包无关,不会因为漏放行变坏链。
+  // 背景:1.0.5 那次"README 图片缺失"就是素材没进 files 白名单,而仓库内测试发现不了。
+  const embedded = [...readme.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map((m) => m[1]);
+  assert.ok(embedded.length > 0, "README 应至少嵌入一张实机图");
+  for (const src of embedded.filter((s) => !/^[a-z][a-z\d+.-]*:\/\//i.test(s))) {
+    const rel = src.replace(/^\.\//, "").split("#")[0];
+    assert.ok(existsSync(join(root, rel)), `README 嵌入的 ${src} 在仓库里就不存在`);
+    assert.ok(files.includes(rel), `README 嵌入的 ${rel} 没进 npm 包 → npm 页面会是坏链,请在 package.json > files 里放行`);
   }
 });
 

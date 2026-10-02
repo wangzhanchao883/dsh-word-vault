@@ -23,6 +23,47 @@ window.__ModuleLoader__.load({
     const SETTINGS_NAMESPACE = "dsh-word-vault";
     const WEB_PATH = "/word-vault";
 
+    /* 桌面版(DSH 0.2.0 desktop shell)把 GUI 页面跑在 dsh-app://app 下:同一个相对链接在 web 版
+     * 解析成 http://127.0.0.1:<port>/word-vault(新标签页正常打开),在桌面版却解析成
+     * dsh-app://app/word-vault —— 而桌面主窗口的新窗口策略只对 http/https 调用
+     * shell.openExternal,其余一律 { action: "deny" }(见 app.asar 主进程 setWindowOpenHandler),
+     * 于是点击被静默吞掉、看起来"点了没反应"。桌面壳在 __DSH_TRANSPORT__.streamBaseUrl 里
+     * 给出了本机 Host 的真实 http origin,所以这里必须拼绝对 http 地址。 */
+    function hostOrigin() {
+      const candidates = [];
+      try {
+        candidates.push(globalThis.__DSH_TRANSPORT__ && globalThis.__DSH_TRANSPORT__.streamBaseUrl);
+      } catch {
+        /* 无该全局量:走 location */
+      }
+      try {
+        candidates.push(location.origin);
+      } catch {
+        /* 非浏览器环境 */
+      }
+      for (const value of candidates) {
+        if (typeof value !== "string" || !value) continue;
+        try {
+          const url = new URL(value);
+          if (url.protocol === "http:" || url.protocol === "https:") return url.origin;
+        } catch {
+          /* 脏值:试下一个 */
+        }
+      }
+      return "";
+    }
+
+    /** 插件页面地址:拿得到 http origin 就返回绝对地址,拿不到就退回相对路径(行为同旧版) */
+    function pageUrl(pathname) {
+      const origin = hostOrigin();
+      if (!origin) return pathname;
+      try {
+        return new URL(pathname, origin).href;
+      } catch {
+        return pathname;
+      }
+    }
+
     const zh = {
       nav: "英语生词库",
       loading: "正在读取配置…",
@@ -279,8 +320,8 @@ window.__ModuleLoader__.load({
           pair(text("photoSatMin", "number", "photoSatMinHint"), text("photoPadUp", "number", "photoPadUpHint"), text("photoMaxPerRun", "number")),
         ]),
         h("div", { className: "wv-links", key: "links" }, [
-          h("a", { className: "wv-link", href: WEB_PATH, target: "_blank", rel: "noopener", key: "a" }, t("openLibrary")),
-          h("a", { className: "wv-link", href: WEB_PATH + "/help", target: "_blank", rel: "noopener", key: "b" }, t("openHelp")),
+          h("a", { className: "wv-link", href: pageUrl(WEB_PATH), target: "_blank", rel: "noopener", key: "a" }, t("openLibrary")),
+          h("a", { className: "wv-link", href: pageUrl(WEB_PATH + "/help"), target: "_blank", rel: "noopener", key: "b" }, t("openHelp")),
         ]),
       ]);
     }

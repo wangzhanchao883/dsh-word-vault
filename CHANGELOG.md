@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 本文件记录本项目所有值得注意的改动。格式参考 Keep a Changelog,版本号遵循语义化版本。
 
+## [1.0.7] - 2026-10-02
+
+### Fixed / 修复
+
+- **桌面版(DSH 0.2.0 desktop shell)点「打开词库界面」完全没反应。** 桌面壳把 GUI 页面跑在
+  Electron 自定义协议 `dsh-app://app` 下(主进程 `protocol.handle("dsh-app", ...)`:静态前端本地发、
+  其余请求带 cookie 转发给本机 Host),而插件入口用的是相对链接
+  `href="/word-vault" target="_blank"`:
+  - Web 版:`location.origin` 就是 `http://127.0.0.1:<端口>`,解析成绝对地址,新标签页正常打开;
+  - 桌面版:相对地址解析成 `dsh-app://app/word-vault`,而桌面主窗口的 `setWindowOpenHandler`
+    只对 `http:`/`https:` 调用 `shell.openExternal`,其余一律 `{ action: "deny" }`
+    → 点击被静默吞掉(同窗口跳转也被 `will-navigate` 拦下)。**不是插件没挂载**:桌面版进程里
+    `/word-vault`、`/word-vault/api/*` 实测全 200。
+  - 修法:入口地址改由 `globalThis.__DSH_TRANSPORT__.streamBaseUrl`(桌面壳给出的本机 Host 真实
+    http origin)拼成**绝对 http 地址**;拿不到 http origin 时退回原来的相对路径,行为与旧版一致。
+    桌面版点击后由系统默认浏览器打开词库页(`shell.openExternal` 的既定行为),Web 版不受影响。
+
+### Added / 新增
+
+- 回归闸门 `test/client.test.mjs`:断言桌面壳(`dsh-app://app` + `__DSH_TRANSPORT__`)下两个入口
+  都是绝对 http 地址,同时覆盖 web 版、离线预览(退回相对路径)与脏值(`streamBaseUrl` 非法)
+  三种情形,防止有人再把入口写回相对链接。
+- 回归闸门 `test/pack.test.mjs`:README 里嵌入的**相对路径**图片必须都在 npm 打包清单里
+  (绝对 URL 不受打包影响,不查)。1.0.5 那次「README 图片缺失」就是素材没进 `files` 白名单,
+  仓库内测试发现不了,只有打包清单能发现。
+  说明:`docs/*.png` 只在 README 正文里被反引号提及、并非嵌入图片,故**不进包**(避免白涨 ~350KB)。
+
 ## [1.0.6] - 2026-10-02
 
 ### Fixed / 修复

@@ -104,6 +104,51 @@ function collectLabels(node, out = []) {
   return out;
 }
 
+/** 收集两个入口链接(a.wv-link),用于断言"点开是不是能被宿主正确处理" */
+function collectLinks(node, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) collectLinks(n, out);
+    return out;
+  }
+  if (typeof node.type === "function") {
+    try {
+      return collectLinks(node.type(node.props), out);
+    } catch {
+      return out;
+    }
+  }
+  if (node.props && node.props.className === "wv-link") {
+    out.push({ text: node.props.children, href: node.props.href, target: node.props.target });
+  }
+  for (const c of node.children || []) collectLinks(c, out);
+  return out;
+}
+
+/** 在指定宿主环境里渲染面板并取出两个入口;渲染完全局量还原,不污染其它用例 */
+function linksUnder({ transport, origin }) {
+  const hadTransport = Object.prototype.hasOwnProperty.call(globalThis, "__DSH_TRANSPORT__");
+  const prevTransport = globalThis.__DSH_TRANSPORT__;
+  const hadLocation = Object.prototype.hasOwnProperty.call(globalThis, "location");
+  const prevLocation = globalThis.location;
+  try {
+    if (transport === undefined) delete globalThis.__DSH_TRANSPORT__;
+    else globalThis.__DSH_TRANSPORT__ = transport;
+    if (origin === undefined) delete globalThis.location;
+    else Object.defineProperty(globalThis, "location", { value: { origin }, configurable: true, writable: true });
+
+    const { registrations } = loadClientBundle();
+    const entry = registrations.find((r) => r.slotName === "settings.section");
+    const scope = { getSnapshot: () => ({ status: "ready", value: {} }), subscribe: () => () => {}, set: () => Promise.resolve() };
+    return collectLinks(entry.Component({ scope, t: (k) => k }));
+  } finally {
+    if (hadTransport) globalThis.__DSH_TRANSPORT__ = prevTransport;
+    else delete globalThis.__DSH_TRANSPORT__;
+    if (hadLocation) Object.defineProperty(globalThis, "location", { value: prevLocation, configurable: true, writable: true });
+    else delete globalThis.location;
+  }
+}
+
 test("客户端半边:契约正确(导出/注入/槽位/副作用都用 effect 注册)", () => {
   const { exported, registrations, effects, dictionaries } = loadClientBundle();
   assert.equal(exported.name, "dsh-word-vault");
@@ -164,6 +209,31 @@ test("客户端半边:面板按分组渲染,且带上说明与两个入口", () 
   // 状态未就绪时给可读提示,而不是崩
   const loading = entry.Component({ scope: { getSnapshot: () => ({ status: "loading" }), subscribe: () => () => {} }, t: (k) => k });
   assert.equal(loading.props.className, "wv-tip");
+});
+
+test("客户端半边:入口地址在桌面壳(dsh-app)下必须是绝对 http 地址", () => {
+  // 桌面版 DSH 0.2 把 GUI 页面跑在 Electron 自定义协议 dsh-app://app 下,而桌面主窗口的
+  // setWindowOpenHandler 只对 http/https 调 shell.openExternal,其余一律 { action: "deny" } ——
+  // 相对链接会解析成 dsh-app://app/word-vault,于是点了完全没反应(2026-10-02 桌面版实测)。
+  // 桌面壳在 __DSH_TRANSPORT__.streamBaseUrl 里给出本机 Host 的真实 http origin,必须用它拼绝对地址。
+  const desktop = linksUnder({ transport: { streamBaseUrl: "http://127.0.0.1:19387" }, origin: "dsh-app://app" });
+  const library = desktop.find((l) => l.text === "openLibrary");
+  const help = desktop.find((l) => l.text === "openHelp");
+  assert.equal(library && library.href, "http://127.0.0.1:19387/word-vault", "桌面壳下词库入口必须是绝对 http 地址");
+  assert.equal(help && help.href, "http://127.0.0.1:19387/word-vault/help", "桌面壳下使用说明入口必须是绝对 http 地址");
+  assert.equal(library && library.target, "_blank");
+
+  // web 版(浏览器直开):没有该全局量,退回 location.origin —— 与旧行为等价,仍是新标签页
+  const web = linksUnder({ transport: undefined, origin: "http://127.0.0.1:19387" });
+  assert.equal(web.find((l) => l.text === "openLibrary").href, "http://127.0.0.1:19387/word-vault");
+
+  // 两个来源都拿不到 http origin(离线预览):退回相对路径,不退化、不抛错
+  const offline = linksUnder({ transport: undefined, origin: "dsh-app://app" });
+  assert.equal(offline.find((l) => l.text === "openLibrary").href, "/word-vault");
+
+  // 脏值不许把地址拼坏(不是合法 URL 就继续试下一个来源)
+  const dirty = linksUnder({ transport: { streamBaseUrl: "not a url" }, origin: "http://127.0.0.1:19387" });
+  assert.equal(dirty.find((l) => l.text === "openLibrary").href, "http://127.0.0.1:19387/word-vault");
 });
 
 test("客户端半边:package.json 声明 ./client 与 dsh.client(0.1.7 的包名清单)", () => {
