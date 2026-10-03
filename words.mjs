@@ -58,6 +58,34 @@ const NOT_PLURAL = new Set([
   "always", "perhaps", "across", "because",
 ]);
 
+/**
+ * 复数形本身就是词条:不能按复数规则还原,否则是**两个不同的词被并成一个**。
+ * 实测事故(2026-10-02):课本词条 `glasses (pl.) 眼镜` 被还原成 glass →
+ * `queryWords()` 的词典联查按 lemma 取到「玻璃」,卡面释义就错了;同类还有
+ * clothes→clothe「给…穿衣」、trousers→trouser。这些一律原样保留。
+ */
+const PLURAL_AS_WORD = new Set([
+  "glasses", "sunglasses", "trousers", "pants", "jeans", "shorts", "clothes", "scissors", "chopsticks",
+]);
+
+/**
+ * 以 -ing 结尾但**不是**动名词/现在分词的常见词(名词/形容词/专有名词)。
+ * 形态规则会把它们砍成根本不存在的词:morning→morn、amazing→amaz、beijing→beij、
+ * dining→din、interesting→interest(课本义是「有趣的」)。这类词原样保留。
+ * 拿不准就加进这里 —— 宁可多存一个形态,也不要把词形砍错(词形就是要背的那个东西)。
+ */
+const ING_WORDS = new Set([
+  // 名词 / 介词
+  "morning", "evening", "during", "thing", "nothing", "something", "anything", "everything",
+  "spring", "string", "swing", "sting", "bring", "king", "ring", "wing", "sing",
+  "stocking", "pudding", "darling", "sibling", "duckling", "building", "meeting", "wedding",
+  "feeling", "meaning", "clothing", "shopping", "ceiling",
+  // -ing 形本身就是课本词条的形容词
+  "interesting", "exciting", "boring", "amazing", "surprising", "tiring", "frightening", "relaxing",
+  // 专有名词(入库前已小写化,只能按词形钉)
+  "beijing", "shanghai", "nanjing", "guangzhou",
+]);
+
 /** 去掉首尾非字母,内部保留连字符与撇号 */
 export function trimToken(raw) {
   if (typeof raw !== "string") return "";
@@ -76,6 +104,9 @@ export function lemmaOf(word) {
   if (w.length < 4) return w;
   if (LEMMA_EXCEPTIONS.has(w)) return LEMMA_EXCEPTIONS.get(w);
   if (NOT_PLURAL.has(w)) return w;
+  // 复数即词条 / -ing 结尾的名词形容词:直接原样保留(见上面两张表的说明)
+  if (PLURAL_AS_WORD.has(w)) return w;
+  if (ING_WORDS.has(w)) return w;
   if (STOPWORDS.has(w) || NOT_WORDS.has(w)) return w;
 
   const stripIfWord = (candidate) => (candidate.length >= 3 ? candidate : w);

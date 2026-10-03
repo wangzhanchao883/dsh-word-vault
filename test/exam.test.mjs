@@ -20,6 +20,8 @@ import {
   buildSentenceRepairPrompt,
   parseSentenceRepair,
   looksLikeSentence,
+  isSimpleSentence,
+  buildExamPrompt,
 } from "../examgen.mjs";
 import { parseChoice, buildExamPageHtml } from "../exam.mjs";
 import {
@@ -214,6 +216,58 @@ test("组题:句子不含该词 → 不合格(不猜)", () => {  const composed 
     rng: makeRng(1),
   });
   assert.equal(bad.ok, false);
+});
+
+// ---------------------------------------------------------------- 简单句门槛(2026-10-03)
+
+test("isSimpleSentence:7~9 年级能读懂的简单句才算合格", () => {
+  // 合格:短、常见词、简单时态
+  assert.equal(isSimpleSentence("I meet my teacher every morning.", "meet"), true);
+  assert.equal(isSimpleSentence("Nice to meet you, Jenny.", "meet"), true);
+  assert.equal(isSimpleSentence("Good health comes from sleep.", "health"), true);
+  // 不合格:不含该词 / 太长 / 从句标记 / 长难词 / 分号括号引号 / 太短不成句
+  assert.equal(isSimpleSentence("I like apples.", "meet"), false);
+  assert.equal(isSimpleSentence("I meet my teacher every morning before I go to school and then we talk about the homework together.", "meet"), false);
+  assert.equal(isSimpleSentence("I meet the boy who lives next to my house.", "meet"), false);
+  assert.equal(isSimpleSentence("We meet to discuss the environmental protection programme.", "meet"), false);
+  assert.equal(isSimpleSentence('He said "I meet her"; she left.', "meet"), false);
+  assert.equal(isSimpleSentence("I meet.", "meet"), false);
+  assert.equal(isSimpleSentence("", "meet"), false);
+  // 真实数据里最常见的垃圾:拍照录入的**空格分隔词表**(没有句末标点),必须拦掉
+  assert.equal(isSimpleSentence("talk tall short hair long quiet pink night", "night"), false);
+  assert.equal(isSimpleSentence("mean himself because never buys clothes beautiful photo parents aunt daughter", "never"), false);
+  // 目标词自己很长不算难词(实测:conversation 12 字母会被自己这道题误杀)
+  assert.equal(isSimpleSentence("I had a long conversation with my teacher today.", "conversation"), true);
+  assert.equal(isSimpleSentence("I need more information about the trip.", "information"), true);
+  // 别的长难词照旧要拦
+  assert.equal(isSimpleSentence("We talk about the environment after class.", "talk"), false);
+});
+
+test("组题:原文是难句/碎片时改由模型写简单句(不再原样沿用)", () => {
+  // 录词原文是一段带从句的长句 —— 正是用户反馈"例句乱、难度大"的来源
+  const hard = "The student, who studies in the library every afternoon, meets his teacher after class.";
+  const composed = composeQuestion({
+    item: { word: "meet", meaning: "遇见", pos: "v.", sentence: hard },
+    raw: { word: "meet", sentence: "I meet my teacher at school.", distractors: ["错过", "送别", "邀请"] },
+    answerIndex: 0,
+    pool: { samePos: [], others: [] },
+    rng: makeRng(1),
+  });
+  assert.equal(composed.ok, true, JSON.stringify(composed.issues));
+  assert.equal(composed.question.sentence, "I meet my teacher at school.");
+  assert.equal(composed.question.sentenceSrc, "llm");
+  assert.match(composed.question.issues.join(), /偏难|偏长/);
+});
+
+test("出题提示词:写死了 7~9 年级简单句口径与原文改写规则", () => {
+  const p = buildExamPrompt([{ word: "meet", meaning: "遇见", sentence: "原句" }]);
+  assert.match(p, /7~9 年级/);
+  assert.match(p, /一眼读懂/);
+  assert.match(p, /改写成一句符合 S0 的简单句/);
+  assert.match(p, /不许\*\*用从句|不许.*从句/);
+  assert.match(p, /被动语态/);
+  const repair = buildSentenceRepairPrompt(["meet"]);
+  assert.match(repair, /7~9 年级/);
 });
 
 // ---------------------------------------------------------------- 出题主流程

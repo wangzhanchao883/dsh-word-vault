@@ -47,7 +47,7 @@ import {
 import { CaptureService } from "./capture.mjs";
 import { generateCards } from "./cardgen.mjs";
 import { exportCardSet, htmlToPdf, htmlToPng, findBrowser } from "./cards.mjs";
-import { generateExam, buildPaperHtml, extractSentenceFromContext } from "./examgen.mjs";
+import { generateExam, buildPaperHtml, extractSentenceFromContext, isSimpleSentence } from "./examgen.mjs";
 import { startExamServer, parseChoice, EXAM_LETTERS } from "./exam.mjs";
 import { translateWords } from "./translate.mjs";
 import { findPhotos, scanPhotos, scannerScript, photoHash, loadProgress } from "./photos.mjs";
@@ -507,6 +507,7 @@ export function apply(ctx, input = {}) {
             meaning: r.card_meaning || r.meaning || "",
             segs,
             story: r.card_story || "",
+            example: r.card_example || "",
             seenCount: r.seen_count,
           };
         });
@@ -765,8 +766,9 @@ export function apply(ctx, input = {}) {
   /**
    * 卡片是否需要补生成:
    * ① 根本没有卡片 ② 有卡片但**拆解块缺音标**(用户要求"所有单词卡都带音标训读",
-   *    加音标功能之前生成的老卡片属于这种)
-   * 注意:补生成走 upsertCard 的默认故事锁 -> 只会补上音标,不会改掉已定稿的荒诞梗。
+   *    加音标功能之前生成的老卡片属于这种) ③ 有卡片但**缺英文例句**(2026-10-03 起卡面
+   *    底部印例句,老卡要补上)
+   * 注意:补生成走 upsertCard 的默认故事锁 -> 只会补上音标与例句,不会改掉已定稿的荒诞梗。
    */
   const hasSegIpa = (row) => {
     if (!row || !row.card_segs) return false;
@@ -778,7 +780,7 @@ export function apply(ctx, input = {}) {
       return false;
     }
   };
-  const cardNeedsWork = (row) => !row.card_updated_at || !hasSegIpa(row);
+  const cardNeedsWork = (row) => !row.card_updated_at || !hasSegIpa(row) || !String(row.card_example || "").trim();
 
   const pickWordRows = (args, { onlyMissing = false, limit = 8 } = {}) => {
     const wanted = args.user || liveConfig.defaultUser;
@@ -839,6 +841,7 @@ export function apply(ctx, input = {}) {
         meaning: c.meaning,
         segs: c.segs,
         story: c.story,
+        example: c.example,
         model: res.model || liveConfig.model,
         source: "llm",
       });
@@ -862,7 +865,7 @@ export function apply(ctx, input = {}) {
   ctx.tools.register(textTool({
     name: "wordvault_make_cards",
     description:
-      "为生词生成记忆卡内容：拆解块(segs) + 一句荒诞梗(story) + 音标/词性/释义，存入本地卡片表。默认只处理还没有卡片的词；regenerate=true 全部重做；words 参数可只重做指定的几个词。",
+      "为生词生成记忆卡内容：拆解块(segs) + 一句荒诞梗(story) + 一句 7 年级能读懂的英文例句(example) + 音标/词性/释义，存入本地卡片表。默认只处理还没有卡片的词(以及缺段音标/缺例句的老卡)；regenerate=true 全部重做；words 参数可只重做指定的几个词。",
     parameters: {
       ...CARD_FILTERS,
       limit: { type: "number", description: "本次最多生成多少张,缺省 8" },
@@ -920,7 +923,8 @@ export function apply(ctx, input = {}) {
       if (picked.error) return picked.error;
 
       let rows = picked.rows;
-      const missing = rows.filter((r) => !r.card_updated_at);
+      // 缺卡片 / 缺段音标 / 缺例句的老卡都在这里补齐(每次出片按 limit 逐步补,不专门全库重跑)
+      const missing = rows.filter((r) => cardNeedsWork(r));
       let generated = 0;
       if (missing.length && args.autoMakeMissing !== false) {
         const gen = await generateAndStore(missing, picked.user, exec && exec.signal);
@@ -951,6 +955,7 @@ export function apply(ctx, input = {}) {
           meaning: r.card_meaning || r.meaning || "",
           segs,
           story: r.card_story || "",
+          example: r.card_example || "",
           seenCount: r.seen_count, // 高频词在卡面上印"标记 N 次"
         };
       });
@@ -1067,7 +1072,9 @@ export function apply(ctx, input = {}) {
       findSentence: (row) => {
         for (const c of recentContexts(db, row.id, 10)) {
           const s = extractSentenceFromContext(c.context, row.lemma);
-          if (s) return s;
+          // 只认"7~9 年级能读懂的简单句"(2026-10-03 用户要求);难句/碎片返回空,
+          // 交给模型按简单口径重写,而不是把原文里的长句从句原样抄进卷子
+          if (s && isSimpleSentence(s, row.lemma)) return s;
         }
         return "";
       },
@@ -1099,7 +1106,7 @@ export function apply(ctx, input = {}) {
   ctx.tools.register(textTool({
     name: "wordvault_exam_start",
     description:
-      "按范围出一份英译汉单选题并起本地答题页:题干是含该词的英文句子,再单独问这个词的意思;ABCD 正确答案按位置配额均衡错开;干扰项优先取同库同词性的词义、由模型补齐。返回一个 127.0.0.1 的答题链接(浏览器打开即可逐题作答、即时判分并回写库)。可顺带导出可打印试卷。",
+      "按范围出一份英译汉单选题并起本地答题页:题干是含该词的英文句子(只用 7~9 年级能读懂的简单句:录词原文太难以至是词表/碎片时改由模型重写),再单独问这个词的意思;ABCD 正确答案按位置配额均衡错开;干扰项优先取同库同词性的词义、由模型补齐。返回一个 127.0.0.1 的答题链接(浏览器打开即可逐题作答、即时判分并回写库)。可顺带导出可打印试卷。",
     parameters: {
       ...CARD_FILTERS,
       count: { type: "number", description: "出多少题,缺省用设置里的 examCount" },

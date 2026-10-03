@@ -269,3 +269,40 @@ test("故事锁:重生成卡片时保留原 story,只更新事实字段;newStory
   assert.equal(getCard(db, u.id, row.id).story, "第三版故事", "newStory 时应换");
   closeDb(db);
 });
+
+test("例句列:有值就更新,这轮没给就保留库里的旧例句", () => {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), "wv-ex-")), "w.db"));
+  const u = ensureUser(db, "u1");
+  recordEntries(db, { userId: u.id, entries: [{ term: "potato", lemma: "potato" }], kind: "hotkey", via: "clipboard", context: "potato" });
+  const row = queryWords(db, { userId: u.id, limit: 5 })[0];
+  upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", meaning: "土豆", segs: [{ en: "po", cn: "破" }], story: "梗", example: "I eat a potato every day." });
+  assert.equal(getCard(db, u.id, row.id).example, "I eat a potato every day.");
+  // 生成时带出新列(queryWords 的 card_example),出片链路要用
+  assert.equal(queryWords(db, { userId: u.id, limit: 5 })[0].card_example, "I eat a potato every day.");
+  // 重生成但模型这轮漏给例句 → 保留旧例句,不能把卡打回空白
+  upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", meaning: "马铃薯", segs: [{ en: "po", cn: "破" }], story: "梗2" });
+  assert.equal(getCard(db, u.id, row.id).example, "I eat a potato every day.", "漏给例句时必须保留旧值");
+  // 给了新例句就更新
+  upsertCard(db, { userId: u.id, wordId: row.id, term: "potato", meaning: "马铃薯", segs: [{ en: "po", cn: "破" }], story: "梗2", example: "The potato is on the table." });
+  assert.equal(getCard(db, u.id, row.id).example, "The potato is on the table.");
+  closeDb(db);
+});
+
+test("迁移:老库(cards 无 example 列)开库后自动补列", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wv-mig-"));
+  const file = join(dir, "w.db");
+  const first = openDb(file);
+  ensureUser(first, "u1");
+  // 模拟老库:去掉 example 列(SQLite 支持 DROP COLUMN)
+  first.exec("ALTER TABLE cards DROP COLUMN example");
+  closeDb(first);
+  const again = openDb(file);
+  const cols = again.prepare("PRAGMA table_info(cards)").all().map((c) => c.name);
+  assert.ok(cols.includes("example"), "开库时应补上 example 列");
+  const u = findUser(again, "u1");
+  recordEntries(again, { userId: u.id, entries: [{ term: "map", lemma: "map" }], kind: "hotkey", via: "clipboard", context: "map" });
+  const row = queryWords(again, { userId: u.id, limit: 5 })[0];
+  upsertCard(again, { userId: u.id, wordId: row.id, term: "map", meaning: "地图", segs: [{ en: "map", cn: "马扑" }], story: "梗", example: "This is a map." });
+  assert.equal(getCard(again, u.id, row.id).example, "This is a map.");
+  closeDb(again);
+});

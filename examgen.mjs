@@ -7,7 +7,9 @@
  *   ② ABCD 的正确答案要**错开**:按位置配额均衡分配(不是"随机后碰巧全是 B")
  *   ③ 干扰项要有**迷惑性**:同词性、同语义场,靠常识排除不掉
  *
- * 句子来源:优先用录词时复制下来的原文(events.context),缺了才让模型写。
+ * 句子来源:优先用录词时复制下来的原文(events.context),但**必须过"简单句"门槛**
+ * (2026-10-03 用户要求:题干例句要 7~9 年级能读懂);原文句太难/是碎片就改由模型重写,
+ * 模型句同样按"常见词、简单时态、≤12 词"的简单口径要求。
  * 干扰项来源:同库同词性的其他词义优先,不足由模型补齐。
  */
 import { collectText, createUserMsg } from "./translate.mjs";
@@ -56,14 +58,21 @@ export function allocateAnswerPositions(count, rng) {
   return arr;
 }
 
-/** 句子是否"含有该词"(容忍常见屈折: +s/+es/+ed/+ing/去 e+ing/双写+ing) */
-export function sentenceHasWord(sentence, word) {
+/** 该词的常见屈折形式(含原形):+s/+es/+ed/+ing/去 e+ing/双写+ing/去 y+ies */
+export function wordForms(word) {
   const w = String(word || "").toLowerCase();
-  if (!w) return false;
+  if (!w) return new Set();
   const forms = new Set([w, `${w}s`, `${w}es`, `${w}ed`, `${w}ing`, `${w}d`]);
   if (w.endsWith("e")) forms.add(`${w.slice(0, -1)}ing`);
   if (/[^aeiou][aeiou][^aeiouwxy]$/.test(w)) forms.add(`${w}${w.slice(-1)}ing`);
   if (w.endsWith("y")) forms.add(`${w.slice(0, -1)}ies`);
+  return forms;
+}
+
+/** 句子是否"含有该词"(容忍常见屈折: +s/+es/+ed/+ing/去 e+ing/双写+ing) */
+export function sentenceHasWord(sentence, word) {
+  const forms = wordForms(word);
+  if (!forms.size) return false;
   const text = String(sentence || "").toLowerCase();
   for (const f of forms) {
     if (new RegExp(`(^|[^a-z])${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z]|$)`).test(text)) return true;
@@ -110,6 +119,44 @@ export function extractSentenceFromContext(context, word) {
   hits.sort((a, b) => a.length - b.length);
   const pick = hits.find((s) => s.length >= 12) || hits[0];
   return pick.length > 200 ? `${pick.slice(0, 197)}…` : pick;
+}
+
+/**
+ * 从句/书面连接词标记:出现就说明句子不是"初一~初三一眼能读懂"的简单句。
+ * 只收真正拉难度的词,不把 that/because 这类在简单句里也常见的词算进来,免得误杀太多。
+ */
+const CLAUSE_MARKERS = new Set([
+  "which", "who", "whom", "whose", "although", "though", "however", "therefore", "nevertheless",
+  "whereas", "despite", "moreover", "furthermore", "consequently", "meanwhile", "otherwise",
+]);
+
+/**
+ * **简单句门槛**(2026-10-03 用户要求):试题例句必须 7~9 年级能读懂。
+ * 之前的做法是"给了录词原文就原样沿用"(S1),于是复制/拍照来的长句、从句、碎片
+ * 甚至代码片段都会原样进卷子 —— 这就是"例句有时候是乱的、难度有点大"的根因。
+ * 判据(全满足才算简单):含该词 · 3~14 个英文单词 · ≤90 字符 · **以 . ! ? 结尾** ·
+ * 无从句标记 · 无分号冒号括号引号 · 没有 ≥11 字母的长词(生僻词信号)。
+ *
+ * "必须以句末标点结尾"是实测补的(2026-10-03,拿真实词库副本跑出来的):
+ * 拍照录入的 context 常常是**空格分隔的词表**(`mean himself because never buys clothes …`),
+ * 它们没有分号、词数也够,只有"没有句末标点"这一条能稳定把它们和真句子分开。
+ */
+export function isSimpleSentence(sentence, word) {
+  const s = cleanSentence(sentence);
+  if (!s) return false;
+  if (word && !sentenceHasWord(s, word)) return false;
+  if (s.length > 90) return false;
+  if (!/[.!?]$/.test(s)) return false;
+  if (/[;:()[\]{}"]/.test(s)) return false;
+  const words = s.match(/[A-Za-z][A-Za-z'’-]*/g) || [];
+  if (words.length < 3 || words.length > 14) return false;
+  const lower = words.map((w) => w.toLowerCase());
+  if (lower.some((w) => CLAUSE_MARKERS.has(w))) return false;
+  // 目标词自己是"要学的那个词",再长也不算难词(实测:conversation 12 字母会被自己这道题误杀);
+  // 只查别的词有没有 ≥11 字母的长难词
+  const target = wordForms(word);
+  if (lower.some((w) => !target.has(w) && w.replace(/[^a-z]/g, "").length >= 11)) return false;
+  return true;
 }
 
 /** 释义拆成义项变体(处理"马铃薯;土豆"这种多义项),用于查重 */
@@ -242,12 +289,17 @@ export function buildExamPrompt(items, opts = {}) {
     '{"word":"原词小写","sentence":"一句含该词的英文句子","distractors":["错误释义1","错误释义2","错误释义3"],"pos":"词性缩写"}',
     "",
     "=== 句子规则 ===",
-    "S1. 如果给了 given_sentence，就**原样沿用**，不要改写。",
+    "S0. **难度硬要求:例句要让初一~初三(7~9 年级)学生一眼读懂。** 只用课本常见词、简单时态",
+    "    (一般现在/过去/将来)、简单主谓宾。**不许**用从句(which/who/although/because/when)、被动语态、",
+    "    生僻词或书面连接词;句子 4~12 个英文单词,句末带标点。",
+    "S1. 如果给了 given_sentence:先判断它符不符合 S0。符合就**原样沿用**;太长、太绕、有从句、",
+    "    或是从原文里切出来的碎片,**就改写成一句符合 S0 的简单句**(保留这个词和大致语境),不要硬抄。",
     "S2. 没给就自己写一句：**必须原样出现这个单词**，≤12 个英文单词，内容用学生熟悉的场景（学校、家里、食堂、操场、宠物）。",
     "    只能加常见后缀（-s/-es/-ed/-ing）；**不许换成派生词**：health 不能写成 healthy，kind 不能写成 kindness，",
     "    eight 不能写成 eighteen。",
     '    正例: health → "Good health comes from sleep and vegetables."   eight → "I get up at eight every morning."',
     '    反例: health → "Eating well keeps you healthy."（句子里没有出现 health）',
+    '          meet → "Nice to meet you, Jenny. It is a pleasure to make your acquaintance."（太长太难）',
     "S3. 句子要能体现该词在这个语境里的**具体词义**，不要写成词典例句般的空话。",
     "",
     "=== 干扰项规则（决定这份卷子有没有用）===",
@@ -318,11 +370,16 @@ export function composeQuestion({ item, raw, answerIndex, pool, rng }) {
   const correct = trimMeaning(clean(item.meaning));
   if (!correct) issues.push("该词没有释义(先补翻译再出题)");
 
-  // 句子:原文优先 → 模型句 → 都不可用则不合格
+  // 句子:原文句要过"简单句"门槛才沿用(2026-10-03),否则改由模型按简单口径重写;
+  // 模型句含该词即用(偏难只记 issue,不废题 —— 否则会大面积缺句)
   let sentence = cleanSentence(item.sentence);
   let sentenceSrc = sentence ? "context" : "";
   if (sentence && !sentenceHasWord(sentence, word)) {
     issues.push("给定的原文句子里没有该词,已弃用");
+    sentence = "";
+    sentenceSrc = "";
+  } else if (sentence && !isSimpleSentence(sentence, word)) {
+    issues.push("原文例句偏难/偏长(不是 7~9 年级简单句),已改由模型重写");
     sentence = "";
     sentenceSrc = "";
   }
@@ -331,6 +388,7 @@ export function composeQuestion({ item, raw, answerIndex, pool, rng }) {
     if (m && sentenceHasWord(m, word)) {
       sentence = m;
       sentenceSrc = "llm";
+      if (!isSimpleSentence(m, word)) issues.push("模型句仍偏难,建议人工看一眼");
     } else {
       issues.push("缺少包含该词的句子");
     }
@@ -400,7 +458,8 @@ export function buildSentenceRepairPrompt(words) {
     "硬要求:",
     "1. 句子里必须**原样出现这个词**（只允许加 -s / -es / -ed / -ing 后缀）；",
     "   **不许用派生词替换**：health 不能写成 healthy，kind 不能写成 kindness，eight 不能写成 eighteen。",
-    "2. 每句 5~10 个英文单词，用学生熟悉的场景。",
+    "2. 每句 5~10 个英文单词，用学生熟悉的场景；**要让初一~初三(7~9 年级)学生一眼读懂**：",
+    "   只用课本常见词、简单时态，不许从句(which/who/although/because/when)、被动语态或生僻词。",
     '3. 只输出 JSON 数组，形如 [{"word":"health","sentence":"..."}]，顺序与输入一致，不要解释。',
     "",
     "单词列表(JSON):",

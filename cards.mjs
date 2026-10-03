@@ -6,7 +6,8 @@
  *   · 每张卡四层：词头（序号圆标 + 大字单词 + 音标/词性/释义）
  *                拆解块（字母片段 ↔ 中文音，上下对齐）
  *                荒诞句（橙色左边框一句话）
- *                默写区（两条虚线）+ 「已攻下」勾选框
+ *                例句（英文简单句，目标词蓝色加粗）+ 「已攻下」勾选框
+ *                —— 2026-10-03 起例句取代原「默写区两条虚线」；老卡还没补上例句时退回虚线
  *   · 不足 8 张时空位印成虚线框「空位 · 错词重写区」，不留白纸
  *   · 单词长度 ≥11 字母时自动缩小字号（.word.long）
  *   · 出片后必须看 `_预览_第1页.png` 自检：第 4 行勾选框不能被切掉
@@ -143,6 +144,16 @@ body {
 .write .lab { font-size: 6.4pt; color: #8798a8; letter-spacing: .3pt; flex: 0 0 auto; }
 .write .lines { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: space-evenly; padding-top: 1mm; }
 .write .lines i { display: block; height: 0; border-bottom: .8pt dashed #c3d0dd; }
+/* 例句块:取代原来的默写横线(2026-10-03 用户要求),虚线顶边保留"可写"的观感 */
+.example { flex: 1 1 auto; display: flex; flex-direction: column; margin-top: 1.8mm; min-height: 8mm;
+  border-top: .8pt dashed #c3d0dd; padding-top: 1mm; }
+.example .lab { font-size: 6.4pt; color: #8798a8; letter-spacing: .3pt; flex: 0 0 auto; }
+.example .en {
+  margin-top: .5mm; font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 8.6pt; line-height: 1.32; color: #23313f;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.example .en b { color: #1f5a94; }
 .foot {
   margin-top: 1.4mm; padding-top: 1.2mm;
   border-top: .7pt dashed #c3d0dd;
@@ -183,6 +194,39 @@ export function escapeHtml(value) {
 }
 
 /**
+ * 把例句里的目标词(含常见屈折形式)标成蓝色加粗,让学生一眼看到它在这句话里的位置。
+ * 返回的是**已转义**的 HTML 片段。
+ */
+export function highlightWord(sentence, word) {
+  const text = String(sentence == null ? "" : sentence);
+  const w = String(word || "").trim().toLowerCase();
+  if (!w) return escapeHtml(text);
+  const forms = [w, `${w}s`, `${w}es`, `${w}ed`, `${w}ing`, `${w}d`];
+  if (w.endsWith("e")) forms.push(`${w.slice(0, -1)}ing`);
+  if (w.endsWith("y")) forms.push(`${w.slice(0, -1)}ies`);
+  const pattern = [...new Set(forms)]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  const re = new RegExp(`(^|[^A-Za-z])(${pattern})(?=[^A-Za-z]|$)`, "gi");
+  let out = "";
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index + m[1].length;
+    const end = start + m[2].length;
+    if (end <= last) {
+      re.lastIndex = start + 1; // 兜底:防零宽匹配死循环
+      continue;
+    }
+    out += escapeHtml(text.slice(last, start)) + "<b>" + escapeHtml(m[2]) + "</b>";
+    last = end;
+  }
+  return out + escapeHtml(text.slice(last));
+}
+
+/**
  * 高频词角标:累计被标记次数达到门槛的才印("高频的更应该标记出来")。
  * 次数 < 门槛(或拿不到次数)时不印,避免卡面被噪声填满。
  */
@@ -211,10 +255,13 @@ export function renderCard(w, idx, opts = {}) {
     "</div></div>" +
     `<div class="split">${segs}</div>` +
     `<div class="story">${escapeHtml(w.story || "")}</div>` +
-    '<div class="write">' +
-    '<div class="lab">✍ 挑战：盖住上面，把单词默写出来</div>' +
-    '<div class="lines"><i></i><i></i></div>' +
-    "</div>" +
+    // 底部:有例句就印例句(2026-10-03 起取代默写横线);老卡还没补上例句时退回原来的横线
+    (w.example
+      ? `<div class="example"><div class="lab">例句 EXAMPLE</div><div class="en">${highlightWord(w.example, w.word)}</div></div>`
+      : '<div class="write">' +
+        '<div class="lab">✍ 挑战：盖住上面，把单词默写出来</div>' +
+        '<div class="lines"><i></i><i></i></div>' +
+        "</div>") +
     '<div class="foot"><span class="box"></span>已攻下</div>' +
     "</div>"
   );
@@ -270,6 +317,17 @@ export function buildDocxHtml({ title = "趣味单词记忆卡", subtitle = "", 
       .map((s) => `<td style="border:1px solid #b9cbdd;background:#eef4fb;text-align:center;padding:4px 6px;width:${Math.floor(100 / Math.max(1, segs.length))}%"><b style="color:#1f5a94">${escapeHtml(s.en)}</b><br><b style="color:#c0392b">${escapeHtml(s.cn)}</b></td>`)
       .join("");
     const freq = Number(w && w.seenCount) >= Number(highFreqMin || 2) ? ` <b style="color:#c0392b;font-size:9pt;">［标记 ${Number(w.seenCount)} 次］</b>` : "";
+    // 底部:有例句印例句(取代默写横线),没有就退回横线,与 PDF 版保持一致
+    const tailRows = w.example
+      ? `<tr><td style="padding:4px 8px 6px 8px;border-top:1px dashed #c3d0dd;">
+    <span style="font-size:7.5pt;color:#8798a8;">例句 EXAMPLE</span><br>
+    <span style="font-size:10pt;">${highlightWord(w.example, w.word)}</span>
+  </td></tr>`
+      : `<tr><td style="padding:6px 8px 2px 8px;color:#8798a8;font-size:8pt;">✍ 挑战：盖住上面，把单词默写出来</td></tr>
+  <tr><td style="padding:0 8px 4px 8px;">
+    <div style="border-bottom:1px dashed #c3d0dd;height:16px;"></div>
+    <div style="border-bottom:1px dashed #c3d0dd;height:16px;"></div>
+  </td></tr>`;
     return `
 <table style="width:100%;border-collapse:collapse;border:1.5px solid #1b2a3a;margin:0 0 10px 0;">
   <tr><td style="padding:6px 8px 2px 8px;">
@@ -279,12 +337,8 @@ export function buildDocxHtml({ title = "趣味单词记忆卡", subtitle = "", 
   </td></tr>
   <tr><td style="padding:2px 8px;"><table style="width:100%;border-collapse:collapse;"><tr>${segRow}</tr></table></td></tr>
   <tr><td style="padding:4px 8px;background:#fdf6f1;border-left:3px solid #e0673a;font-size:10pt;">${escapeHtml(w.story || "")}</td></tr>
-  <tr><td style="padding:6px 8px 2px 8px;color:#8798a8;font-size:8pt;">✍ 挑战：盖住上面，把单词默写出来</td></tr>
-  <tr><td style="padding:0 8px 8px 8px;">
-    <div style="border-bottom:1px dashed #c3d0dd;height:16px;"></div>
-    <div style="border-bottom:1px dashed #c3d0dd;height:16px;"></div>
-    <div style="margin-top:4px;font-size:8pt;color:#8798a8;">☐ 已攻下</div>
-  </td></tr>
+  ${tailRows}
+  <tr><td style="padding:0 8px 6px 8px;font-size:8pt;color:#8798a8;">☐ 已攻下</td></tr>
 </table>`;
   });
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body style="font-family:'Microsoft YaHei','微软雅黑',sans-serif;color:#1b2a3a;">

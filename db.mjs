@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS cards (
   meaning    TEXT NOT NULL DEFAULT '',
   segs       TEXT NOT NULL DEFAULT '[]',
   story      TEXT NOT NULL DEFAULT '',
+  example    TEXT NOT NULL DEFAULT '',
   model      TEXT NOT NULL DEFAULT '',
   source     TEXT NOT NULL DEFAULT 'llm',
   created_at TEXT NOT NULL,
@@ -182,6 +183,9 @@ function migrate(db) {
   if (!scols.includes("status")) db.exec("ALTER TABLE exam_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'open'");
   if (!scols.includes("token")) db.exec("ALTER TABLE exam_sessions ADD COLUMN token TEXT NOT NULL DEFAULT ''");
   if (!scols.includes("served_at")) db.exec("ALTER TABLE exam_sessions ADD COLUMN served_at TEXT");
+  // 2026-10-03:卡面例句(取代原来的默写横线),老库补列
+  const ccols = db.prepare("PRAGMA table_info(cards)").all().map((c) => c.name);
+  if (!ccols.includes("example")) db.exec("ALTER TABLE cards ADD COLUMN example TEXT NOT NULL DEFAULT ''");
 }
 
 export function closeDb(db) {
@@ -430,7 +434,7 @@ export function queryWords(db, filter = {}) {
       `SELECT w.*, d.phonetic, d.pos, d.meaning,
               c.id AS card_id, c.term AS card_term, c.phonetic AS card_phonetic,
               c.pos AS card_pos, c.meaning AS card_meaning, c.segs AS card_segs,
-              c.story AS card_story, c.model AS card_model, c.source AS card_source,
+              c.story AS card_story, c.example AS card_example, c.model AS card_model, c.source AS card_source,
               c.updated_at AS card_updated_at
        FROM words w
        LEFT JOIN dict d ON d.term = w.lemma
@@ -452,25 +456,29 @@ export function queryWords(db, filter = {}) {
  * **故事锁(2026-09-16 用户要求)**:重生成卡片时默认**保留库里已有的 story**(荒诞梗)。
  * 原因:同一个词每次重生成都换一版梗,孩子记不住("不利于记忆");梗应该首次定稿后固定下来。
  * 想换梗要显式传 newStory: true;想连事实字段都不动就别调用这个函数。
+ *
+ * **例句(2026-10-03)**:example 是事实字段,有新值就更新;这轮没给(老提示词/模型漏给)
+ * 就沿用库里的旧例句,避免把已经补好的卡打回空白。
  */
-export function upsertCard(db, { userId, wordId, term, phonetic = "", pos = "", meaning = "", segs = [], story = "", model = "", source = "llm", keepStory = true, newStory = false }) {
+export function upsertCard(db, { userId, wordId, term, phonetic = "", pos = "", meaning = "", segs = [], story = "", example = "", model = "", source = "llm", keepStory = true, newStory = false }) {
   const at = nowIso();
   const segsJson = JSON.stringify(Array.isArray(segs) ? segs : []);
-  const existing = db.prepare("SELECT id, story FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId);
+  const existing = db.prepare("SELECT id, story, example FROM cards WHERE user_id = ? AND word_id = ?").get(userId, wordId);
   // 故事锁:已有卡片且没要求换梗 -> 沿用旧 story(其余事实字段照常更新)
   const lockedStory = existing && keepStory && !newStory && existing.story ? existing.story : null;
   const finalStory = lockedStory || story;
+  const finalExample = String(example || "").trim() || (existing ? String(existing.example || "") : "");
   if (existing) {
     db.prepare(
-      `UPDATE cards SET term = ?, phonetic = ?, pos = ?, meaning = ?, segs = ?, story = ?, model = ?, source = ?, updated_at = ?
+      `UPDATE cards SET term = ?, phonetic = ?, pos = ?, meaning = ?, segs = ?, story = ?, example = ?, model = ?, source = ?, updated_at = ?
        WHERE id = ?`,
-    ).run(term, phonetic, pos, meaning, segsJson, finalStory, model, source, at, existing.id);
+    ).run(term, phonetic, pos, meaning, segsJson, finalStory, finalExample, model, source, at, existing.id);
     return { ok: true, created: false, wordId, storyLocked: !!lockedStory };
   }
   db.prepare(
-    `INSERT INTO cards(user_id, word_id, term, phonetic, pos, meaning, segs, story, model, source, created_at, updated_at)
-     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(userId, wordId, term, phonetic, pos, meaning, segsJson, story, model, source, at, at);
+    `INSERT INTO cards(user_id, word_id, term, phonetic, pos, meaning, segs, story, example, model, source, created_at, updated_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(userId, wordId, term, phonetic, pos, meaning, segsJson, story, finalExample, model, source, at, at);
   return { ok: true, created: true, wordId };
 }
 

@@ -251,6 +251,7 @@ function cardFakeLlm(segMap) {
           meaning: `${w}的释义`,
           segs: segMap[w],
           story: `${w} 的荒诞句`,
+          example: EXAMPLES[w] || `I like the ${w}.`,
         })),
       );
       async function* gen() {
@@ -267,6 +268,13 @@ const SEGS = {
   map: [{ en: "ma", cn: "马", ipa: "/ma/" }, { en: "p", cn: "铺", ipa: "/p/" }],
   plant: [{ en: "plan", cn: "普兰", ipa: "/plan/" }, { en: "t", cn: "特", ipa: "/t/" }],
   tomato: [{ en: "to", cn: "特", ipa: "/to/" }, { en: "ma", cn: "马", ipa: "/ma/" }, { en: "to", cn: "头", ipa: "/to/" }],
+};
+
+/** 例句:必须含该词(卡面底部就印这一句),词形与难度按 7 年级口径 */
+const EXAMPLES = {
+  map: "This is a map of China.",
+  plant: "The plant is green.",
+  tomato: "I put a tomato in my salad.",
 };
 
 test("P2 工具链路:make_cards 生成并入库 → export_cards 出 HTML", async () => {
@@ -304,7 +312,12 @@ test("P2 工具链路:make_cards 生成并入库 → export_cards 出 HTML", asy
     assert.equal(exported.pages, 1);
     assert.ok(exported.files.html && exported.files.html.endsWith(".html"));
     assert.ok(existsSync(exported.files.html));
-    assert.match(readFileSync(exported.files.html, "utf8"), /map/);
+    const htmlText = readFileSync(exported.files.html, "utf8");
+    assert.match(htmlText, /map/);
+    // 卡面底部印例句(2026-10-03),目标词蓝色加粗,不再印默写横线
+    assert.match(htmlText, /例句 EXAMPLE/);
+    assert.match(htmlText, /This is a <b>map<\/b> of China\./);
+    assert.ok(!htmlText.includes('class="lines"'));
   } finally {
     cleanup(dir, rt.effects);
   }

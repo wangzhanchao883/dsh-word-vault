@@ -15,6 +15,7 @@
  *   · story 超长则截断并在失败项里记录
  */
 import { collectText, createUserMsg } from "./translate.mjs";
+import { sentenceHasWord } from "./examgen.mjs";
 
 export const CARD_SYSTEM_HINT = "英语记忆卡设计师:谐音拆词 + 一句荒诞梗钉住拼写";
 
@@ -43,9 +44,20 @@ export function buildCardPrompt(items) {
     "F. 用学生熟悉的场景(游戏/食堂/同学/家长钱包/校园日常)；荒诞但不丧、好笑但不低俗。",
     "G. 禁用:万能恋爱鸡汤、只有语气词的梗、病痛/死亡/灾难等暗黑梗、任何贬低学习者的话。",
     "",
+    "=== 例句规则(每张卡都必须有,卡面底部印这一句) ===",
+    "P. ① 必须**原样出现这个单词**(只允许加 -s/-es/-ed/-ing 后缀);不许换成派生词:",
+    "      health 不能写成 healthy,kind 不能写成 kindness,eight 不能写成 eighteen。",
+    "   ② 难度:**初一(7 年级)学生能独立读懂**——只用课本常见词、一般现在/过去/将来时、简单主谓宾;",
+    "      **不许**用从句(which/that/who/although/because/when)、被动语态、生僻词或成语。",
+    "   ③ 长度 6~12 个英文单词,句末带标点;场景用学生熟悉的(学校、家里、食堂、操场、宠物)。",
+    "   ④ 例句要能体现这个词在这句话里的**具体意思**,不要写成词典例句般的空话。",
+    '   正例: health → "Good health comes from sleep."    eight → "I get up at eight every morning."',
+    "   反例(不合格): health → \"Eating well keeps you healthy.\"(句里没有 health);",
+    '                meet → "Nice to meet you, Jenny. It is a pleasure to make your acquaintance."(太长太难)',
+    "",
     "=== 其他 ===",
     "H. 只输出 JSON 数组，不要解释文字、不要 markdown 代码块。",
-    'I. 每项格式:{"word":"原词小写","phonetic":"/音标/","pos":"词性缩写","meaning":"中文释义(不超过12字)","segs":[{"en":"字母片段","cn":"中文音","ipa":"/该块音标/","note":"可选规律小字"}],"story":"一句话荒诞梗"}',
+    'I. 每项格式:{"word":"原词小写","phonetic":"/音标/","pos":"词性缩写","meaning":"中文释义(不超过12字)","segs":[{"en":"字母片段","cn":"中文音","ipa":"/该块音标/","note":"可选规律小字"}],"story":"一句话荒诞梗","example":"一句简单的英文例句"}',
     "J. segs 的 en 按顺序拼接必须**恰好等于原词**(不能多字母、不能少字母、不能改字母)。",
     "M. **每块必须给该块的真实音标 ipa**(用 / / 包住,如 /rɪ/)。把各块 ipa 按顺序拼起来、去掉重音符号后,必须≈整词音标——这是硬要求。",
     "   反例(不合格): potato 的 ta 块写 /tə/(应为 /teɪ/)   regression 的三块拼不出 /rɪɡreʃn/",
@@ -149,6 +161,20 @@ export function validateCard(raw, expectedWord) {
   }
   if (!story) issues.push("缺少荒诞句");
 
+  // 例句:卡面底部取代原来的默写横线(用户 2026-10-03 要求),必须是含该词的简单英文句。
+  // 缺例句 / 例句里没这个词 = 硬失败(触发一次重试);只是偏长则保留但打低质量标记。
+  let example = clean(raw && raw.example)
+    .replace(/\s+/g, " ")
+    .replace(/^[\s\-–—•*·>»"“'‘]+/, "")
+    .trim();
+  const exampleWords = example ? example.split(/\s+/).filter((x) => /[A-Za-z]/.test(x)).length : 0;
+  if (!example) issues.push("缺少英文例句");
+  else if (!sentenceHasWord(example, word)) issues.push(`例句里没有出现该词:${example.slice(0, 40)}`);
+  else {
+    if (exampleWords > 14) qualityIssues.push(`例句偏长(${exampleWords} 个词),应控制在 6~12 个词`);
+    if (example.length > 90) qualityIssues.push(`例句偏长(${example.length} 字符),应控制在 90 字符内`);
+  }
+
   const card = {
     word,
     phonetic,
@@ -156,8 +182,10 @@ export function validateCard(raw, expectedWord) {
     meaning: clean(raw && raw.meaning),
     segs,
     story,
+    example,
   };
-  const hardFail = !card.segs.length || joined !== word || !story;
+  const exampleOk = !!example && sentenceHasWord(example, word);
+  const hardFail = !card.segs.length || joined !== word || !story || !exampleOk;
   return {
     ok: !hardFail,
     low: !hardFail && qualityIssues.length > 0,
@@ -195,8 +223,9 @@ export async function generateCards({ llm, provider, model, items, batchSize = 8
         model,
         messages: [await createUserMsg(prompt)],
         // 预算要给足:宿主的模型可能带推理(reasoning),推理 token 也算在 maxTokens 里,
-      // 预算太小会把 JSON 挤掉,表现就是"模型未返回该词"(实测 6 词 4500 全部失败)
-      maxTokens: Math.min(16000, 2500 * batch.length + 2000),
+      // 预算太小会把 JSON 挤掉,表现就是"模型未返回该词"(实测 6 词 4500 全部失败)。
+      // 2026-10-03 起每项多一个 example 字段,单价再抬一点。
+      maxTokens: Math.min(20000, 3200 * batch.length + 2000),
         temperature: 0.9,
       },
       signal,

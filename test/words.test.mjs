@@ -22,11 +22,31 @@ test("lemmaOf 保守还原:常规形态能还原,例外不动", () => {
   assert.equal(lemmaOf("grass"), "grass");
   assert.equal(lemmaOf("us"), "us");
   assert.equal(lemmaOf("houses"), "house");
-  assert.equal(lemmaOf("glasses"), "glass");
+  // 复数即词条:glasses(眼镜) 不能还原成 glass(玻璃),否则词典联查取到另一个词的释义
+  assert.equal(lemmaOf("glasses"), "glasses");
   assert.equal(lemmaOf("watches"), "watch");
   assert.equal(lemmaOf("boxes"), "box");
   assert.equal(lemmaOf("potatoes"), "potato");
   assert.equal(lemmaOf("shoes"), "shoe");
+});
+
+test("lemmaOf 不把 -ing 结尾的名词/形容词砍成不存在的词", () => {
+  // 实测事故(2026-10-02):morning→morn、beijing→beij、dining→din、amazing→amaz
+  assert.equal(lemmaOf("morning"), "morning");
+  assert.equal(lemmaOf("evening"), "evening");
+  assert.equal(lemmaOf("beijing"), "beijing");
+  assert.equal(lemmaOf("amazing"), "amazing");
+  assert.equal(lemmaOf("interesting"), "interesting");
+  assert.equal(lemmaOf("boring"), "boring");
+  assert.equal(lemmaOf("spring"), "spring");
+  assert.equal(lemmaOf("during"), "during");
+  assert.equal(lemmaOf("building"), "building");
+  // 真正的动名词/现在分词照旧还原
+  assert.equal(lemmaOf("eating"), "eat");
+  assert.equal(lemmaOf("running"), "run");
+  assert.equal(lemmaOf("swimming"), "swim");
+  assert.equal(lemmaOf("shopping"), "shopping"); // 名词「购物」是课本词条
+  assert.equal(lemmaOf("playing"), "play");
 });
 
 test("停用词与非词汇被过滤,实词保留", () => {

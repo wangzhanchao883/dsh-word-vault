@@ -11,14 +11,15 @@ import {
   exportCardSet,
   findBrowser,
   findPandoc,
+  highlightWord,
   PER_PAGE,
   escapeHtml,
 } from "../cards.mjs";
 import { buildCardPrompt, parseCardOutput, validateCard, generateCards } from "../cardgen.mjs";
 
 const SAMPLE = [
-  { word: "hamburger", phonetic: "/ˈhæmbɜːɡə(r)/", pos: "n.", meaning: "汉堡包", segs: [{ en: "ham", cn: "汉" }, { en: "bur", cn: "饱" }, { en: "ger", cn: "哥" }], story: "汉饱哥一口气吞了八个汉堡，最后卡在门框里。" },
-  { word: "map", phonetic: "/mæp/", pos: "n.", meaning: "地图", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "扑" }], story: "马扑到地图上，把整条街压成了褶子。" },
+  { word: "hamburger", phonetic: "/ˈhæmbɜːɡə(r)/", pos: "n.", meaning: "汉堡包", segs: [{ en: "ham", cn: "汉" }, { en: "bur", cn: "饱" }, { en: "ger", cn: "哥" }], story: "汉饱哥一口气吞了八个汉堡，最后卡在门框里。", example: "I eat a hamburger for lunch." },
+  { word: "map", phonetic: "/mæp/", pos: "n.", meaning: "地图", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "扑" }], story: "马扑到地图上，把整条街压成了褶子。", example: "This is a map of China." },
 ];
 
 function makeWords(n) {
@@ -67,12 +68,32 @@ test("生成卡片 HTML:页眉/页码/卡片数", () => {
   assert.match(html, /用户1 · 8 词/);
   assert.equal((html.match(/<div class="card">/g) || []).length, 8);
   assert.equal((html.match(/空位 · 错词重写区/g) || []).length, 0);
-  // 四层结构都在
+  // 四层结构都在(第四层是例句块,2026-10-03 起取代默写横线)
   assert.match(html, /class="idx"/);
   assert.match(html, /class="split"/);
   assert.match(html, /class="story"/);
-  assert.match(html, /class="write"/);
+  assert.match(html, /class="example"/);
+  assert.match(html, /例句 EXAMPLE/);
+  assert.ok(!html.includes('class="lines"'), "有例句时不再印默写横线");
   assert.match(html, /已攻下/);
+});
+
+test("没有例句的老卡退回默写横线(不空着也不报错)", () => {
+  const html = renderCard({ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x" }, 1);
+  assert.match(html, /class="write"/);
+  assert.match(html, /挑战：盖住上面/);
+  assert.ok(!html.includes('class="example"'));
+});
+
+test("例句里的目标词被标成蓝色加粗,屈折形式也认", () => {
+  const one = renderCard({ word: "map", example: "This is a map of China.", segs: [], story: "x" }, 1);
+  assert.match(one, /<b>map<\/b>/);
+  assert.match(renderCard({ word: "plant", example: "The plants are green.", segs: [], story: "x" }, 2), /<b>plants<\/b>/);
+  assert.match(renderCard({ word: "make", example: "She is making a cake.", segs: [], story: "x" }, 3), /<b>making<\/b>/);
+  // 例句里没有该词时原样输出(不硬塞高亮)
+  assert.equal(highlightWord("I like apples.", "map"), "I like apples.");
+  // 转义照旧生效
+  assert.equal(highlightWord("<b>map</b>", "map"), "&lt;b&gt;<b>map</b>&lt;/b&gt;");
 });
 
 test("不足 8 张时空位印成「错词重写区」", () => {
@@ -110,7 +131,11 @@ test("Word 版用表格排版且带勾选框", () => {
   assert.match(html, /<table/);
   assert.match(html, /☐ 已攻下/);
   assert.match(html, /hamburger/);
-  assert.match(html, /挑战：盖住上面/);
+  // 有例句印例句(与 PDF 版一致),没有才退回默写横线
+  assert.match(html, /例句 EXAMPLE/);
+  assert.match(html, /I eat a <b>hamburger<\/b> for lunch\./);
+  const legacy = buildDocxHtml({ title: "T", words: [{ word: "map", segs: [], story: "x" }] });
+  assert.match(legacy.html, /挑战：盖住上面/);
 });
 
 test("exportCardSet 只出 HTML 时不需要浏览器", async () => {
@@ -169,6 +194,12 @@ test("提示词包含全部词与硬约束", () => {
   assert.match(p, /短词/);
   assert.match(p, /40 字以内/);
   assert.match(p, /绝不编造/);
+  // 例句规则(2026-10-03):卡面底部印例句,必须含该词且 7 年级能读懂
+  assert.match(p, /example/);
+  assert.match(p, /例句/);
+  assert.match(p, /原样出现这个单词/);
+  assert.match(p, /7 年级/);
+  assert.match(p, /6~12 个英文单词/);
 });
 
 test("解析:容忍围栏/前后废话/逐行对象", () => {
@@ -178,23 +209,44 @@ test("解析:容忍围栏/前后废话/逐行对象", () => {
   assert.deepEqual(parseCardOutput("完全不是 JSON"), []);
 });
 
-test("校验:拆解必须拼回原词 / 音标格式 / 梗长", () => {
-  const good = validateCard({ word: "hamburger", phonetic: "/x/", segs: [{ en: "ham", cn: "汉" }, { en: "burger", cn: "饱哥" }], story: "短句" }, "hamburger");
+test("校验:拆解必须拼回原词 / 音标格式 / 梗长 / 例句", () => {
+  const good = validateCard(
+    { word: "hamburger", phonetic: "/x/", segs: [{ en: "ham", cn: "汉" }, { en: "burger", cn: "饱哥" }], story: "短句", example: "I eat a hamburger for lunch." },
+    "hamburger",
+  );
   assert.equal(good.ok, true);
   assert.deepEqual(good.card.segs.length, 2);
+  assert.equal(good.card.example, "I eat a hamburger for lunch.");
 
-  const mismatch = validateCard({ word: "map", segs: [{ en: "ma", cn: "马" }], story: "x" }, "map");
+  const mismatch = validateCard({ word: "map", segs: [{ en: "ma", cn: "马" }], story: "x", example: "This is a map." }, "map");
   assert.equal(mismatch.ok, false);
   assert.match(mismatch.issues.join(), /不一致/);
 
-  const badPhonetic = validateCard({ word: "map", phonetic: "mæp", segs: [{ en: "map", cn: "马扑" }], story: "x" }, "map");
+  const badPhonetic = validateCard({ word: "map", phonetic: "mæp", segs: [{ en: "map", cn: "马扑" }], story: "x", example: "This is a map." }, "map");
   assert.equal(badPhonetic.ok, true);
   assert.equal(badPhonetic.card.phonetic, "");
   assert.match(badPhonetic.issues.join(), /音标格式/);
 
-  const longStory = validateCard({ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "很".repeat(70) }, "map");
+  const longStory = validateCard({ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "很".repeat(70), example: "This is a map." }, "map");
   assert.ok(longStory.card.story.length <= 59);
   assert.match(longStory.issues.join(), /截断/);
+
+  // 缺例句 / 例句里没这个词 = 硬失败(触发重试),否则卡面底部会空着
+  const noExample = validateCard({ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x" }, "map");
+  assert.equal(noExample.ok, false);
+  assert.match(noExample.issues.join(), /缺少英文例句/);
+  const wrongExample = validateCard({ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x", example: "I like apples." }, "map");
+  assert.equal(wrongExample.ok, false);
+  assert.match(wrongExample.issues.join(), /例句里没有出现该词/);
+
+  // 例句偏长只算质量告警(保留卡片),不丢词
+  const longExample = validateCard(
+    { word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x", example: "This is a very beautiful and interesting map of the whole country in my classroom." },
+    "map",
+  );
+  assert.equal(longExample.ok, true);
+  assert.equal(longExample.low, true);
+  assert.match(longExample.qualityIssues.join(), /例句偏长/);
 });
 
 /** 假 LLM:按调用次序返回预设文本 */
@@ -215,18 +267,19 @@ function fakeLlm(...payloads) {
 
 test("generateCards:正常返回即入库级卡片", async () => {
   const payload = JSON.stringify([
-    { word: "map", phonetic: "/mæp/", pos: "n.", meaning: "地图", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "扑" }], story: "马扑到地图上。" },
+    { word: "map", phonetic: "/mæp/", pos: "n.", meaning: "地图", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "扑" }], story: "马扑到地图上。", example: "This is a map of China." },
   ]);
   const res = await generateCards({ llm: fakeLlm(payload), provider: "p", model: "m", items: [{ word: "map" }] });
   assert.equal(res.cards.length, 1);
   assert.equal(res.failures.length, 0);
   assert.equal(res.cards[0].word, "map");
   assert.equal(res.cards[0].segs.length, 2);
+  assert.equal(res.cards[0].example, "This is a map of China.");
 });
 
 test("generateCards:拆解不合格会带着原因重试一次", async () => {
-  const bad = JSON.stringify([{ word: "map", segs: [{ en: "wrong", cn: "错" }], story: "x" }]);
-  const good = JSON.stringify([{ word: "map", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "铺" }], story: "重试后的梗" }]);
+  const bad = JSON.stringify([{ word: "map", segs: [{ en: "wrong", cn: "错" }], story: "x", example: "This is a map." }]);
+  const good = JSON.stringify([{ word: "map", segs: [{ en: "ma", cn: "马" }, { en: "p", cn: "铺" }], story: "重试后的梗", example: "I have a map." }]);
   const res = await generateCards({ llm: fakeLlm(bad, good), provider: "p", model: "m", items: [{ word: "map" }] });
   assert.equal(res.cards.length, 1);
   assert.equal(res.cards[0].story, "重试后的梗");
@@ -236,7 +289,7 @@ test("generateCards:拆解不合格会带着原因重试一次", async () => {
 
 test("质量闸门:逐字母硬拆会被判 low 并重试,仍不合格也保留卡片", async () => {
   const letterByLetter = JSON.stringify([
-    { word: "health", segs: [{ en: "h", cn: "喝" }, { en: "e", cn: "鹅" }, { en: "a", cn: "啊" }, { en: "l", cn: "乐" }, { en: "t", cn: "踢" }, { en: "h", cn: "好" }], story: "逐字母的梗" },
+    { word: "health", segs: [{ en: "h", cn: "喝" }, { en: "e", cn: "鹅" }, { en: "a", cn: "啊" }, { en: "l", cn: "乐" }, { en: "t", cn: "踢" }, { en: "h", cn: "好" }], story: "逐字母的梗", example: "Good health comes from sleep." },
   ]);
   // 两次都返回同一份逐字母结果 → 保留但标记 low,并进 lowQuality,而不是丢词
   const res = await generateCards({ llm: fakeLlm(letterByLetter, letterByLetter), provider: "p", model: "m", items: [{ word: "health" }] });
@@ -249,7 +302,7 @@ test("质量闸门:逐字母硬拆会被判 low 并重试,仍不合格也保留�
 
 test("质量闸门:音节块拆解直接通过(不触发重试)", async () => {
   const good = JSON.stringify([
-    { word: "tomato", segs: [{ en: "to", cn: "特" }, { en: "ma", cn: "马" }, { en: "to", cn: "头" }], story: "特马头" },
+    { word: "tomato", segs: [{ en: "to", cn: "特" }, { en: "ma", cn: "马" }, { en: "to", cn: "头" }], story: "特马头", example: "I put a tomato in my salad." },
   ]);
   const res = await generateCards({ llm: fakeLlm(good), provider: "p", model: "m", items: [{ word: "tomato" }] });
   assert.equal(res.cards.length, 1);
@@ -258,7 +311,7 @@ test("质量闸门:音节块拆解直接通过(不触发重试)", async () => {
 });
 
 test("generateCards:模型漏词记为失败项", async () => {
-  const payload = JSON.stringify([{ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x" }]);
+  const payload = JSON.stringify([{ word: "map", segs: [{ en: "map", cn: "马扑" }], story: "x", example: "This is a map." }]);
   const res = await generateCards({ llm: fakeLlm(payload), provider: "p", model: "m", items: [{ word: "map" }, { word: "plant" }] });
   assert.equal(res.cards.length, 1);
   assert.equal(res.failures.length, 1);
