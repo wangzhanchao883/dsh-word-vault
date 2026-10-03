@@ -17,7 +17,7 @@
 
 ## 环境要求（先看这条）
 
-- **本版（1.0.4）对应 DSH 0.1.7 ~ 0.2.x**（本机实测 0.1.7-rc.2 与 0.2.0-rc.1）。
+- **本版（1.0.8）对应 DSH 0.1.7 ~ 0.2.x**（本机实测 0.1.7-rc.2、0.2.0-rc.1 与 0.2.0-rc.2 桌面版）。
   **0.2 已实测可用**——host 工具与浏览器端设置页完整跑通；`peerDependencies` 上界已从
   `<0.2.0-0` 抬到 `<0.3.0-0`。DSH 0.1.7 换了设置契约
   （浏览器端 `settingsScope` → `configForms`），本版的设置面板是按新契约重写的。
@@ -99,7 +99,13 @@ Ctrl+C 复制英文
 | `wordvault_query` | 按时间区间 / 出现次数区间 / 掌握状态 / 排序 查询词条 |
 | `wordvault_status` | 库统计 + 各用户 + 助手状态 + 最近录入日志（自检排障用） |
 | `wordvault_capture_clipboard` | 请求助手立刻抓一次剪贴板 |
-| `wordvault_fix_last` | 撤销最近一次录入 / 改到另一个用户库 |`r`n| `wordvault_make_cards` | 生成记忆卡内容(拆词 + 荒诞梗),可只重做指定词 |`r`n| `wordvault_export_cards` | 出记忆卡 HTML / PDF / Word + 首页预览 |`r`n| `wordvault_exam_start` | 按范围出题 + 起本地答题页(可顺带出打印卷) |`r`n| `wordvault_exam_answer` | 手工录分(批改打印卷/对话答题) |`r`n| `wordvault_exam_result` | 考试结算与错题清单 |`r`n| `wordvault_exam_paper` | 导出可打印试卷 + 参考答案 |
+| `wordvault_fix_last` | 撤销最近一次录入 / 改到另一个用户库 |
+| `wordvault_make_cards` | 生成记忆卡内容（拆解块 + 荒诞梗 + 7 年级英文例句），可只重做指定词 |
+| `wordvault_export_cards` | 出记忆卡 HTML / PDF / Word + 首页预览 |
+| `wordvault_exam_start` | 按范围出题 + 起本地答题页（可顺带出打印卷） |
+| `wordvault_exam_answer` | 手工录分（批改打印卷/对话答题） |
+| `wordvault_exam_result` | 考试结算与错题清单 |
+| `wordvault_exam_paper` | 导出可打印试卷 + 参考答案 |
 | `wordvault_scan_photo` | 扫照片找被标记的印刷词(输出联络图) |
 | `wordvault_photo_status` | 照片通道进度 |
 
@@ -207,7 +213,7 @@ A. 遇见     B. 错过     C. 送别     D. 邀请
 | 现象 | 真实原因 | 修法 |
 |---|---|---|
 | 10 个词判"缺少包含该词的句子" | 录词时的 `context` 可能是**中文备注**（没有英文句），于是要模型现写；而模型爱用**派生词**（`health`→`healthy`、`kind`→`kindness`），旧校验只认原词与 -s/-ed/-ing | **补句子重试**：窄指令再问一次，提示词里写明"不许用派生词"并给正/反例 → 当次 10/10 成题 |
-| `entity` 的题干就是 `entities` 一个词 | 复制终端内容时录进来的**裸词**被当成了句子 | 句子质量门槛 `looksLikeSentence`（≥3 个英文词、≥8 字符）才算题干 |
+| `entity` 的题干就是 `entities` 一个词 | 复制终端内容时录进来的**裸词**被当成了句子 | 句子质量门槛 `looksLikeSentence`（≥3 个英文词、≥8 字符）才算题干；**2026-10-03（1.0.8）起加码为 `isSimpleSentence`**：含该词、3~14 词、≤90 字符、**以 `.`/`!`/`?` 结尾**、无从句标记与长难词；原文句过不了就交模型按 7~9 年级口径重写 |
 | 终端垃圾词（`entity`/`structure`/`geometry`/`monorepo`）混进考卷 | 录入通道不区分"生词"和"复制到的任意英文片段" | `scope.excludeWords` 可点名排除；出题/出片前建议先清库（P5 词库管理界面会做批量清理） |
 
 ### 落库
@@ -372,7 +378,9 @@ words(id,user_id,kind,term,lemma,first_seen_at,last_seen_at,seen_count,status,st
       UNIQUE(user_id,kind,lemma)                                  -- kind=word 单词 / kind=phrase 词组
 events(id,user_id,word_id,kind,via,context,capture_id,created_at) -- 每次录入一条,统计与回滚的依据
 captures(id PK,user_id,via,text,item_count,status,created_at,updated_at)
-cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,model,source,created_at,updated_at)`r`n      UNIQUE(user_id,word_id)                                     -- 记忆卡内容(segs 存 JSON),出片可复现`r`nexam_sessions / exam_answers                                      -- P3 考试闭环预留
+cards(id PK,user_id,word_id,term,phonetic,pos,meaning,segs,story,example,model,source,created_at,updated_at)
+      UNIQUE(user_id,word_id)                                     -- 记忆卡内容(segs 存 JSON;example 是卡面英文例句),出片可复现
+exam_sessions / exam_answers                                      -- P3 考试闭环预留
 ```
 
 - **计次口径**：同一批内按 `lemma` 去重（同一次录入里重复出现只算一次）；跨批次每录一次 `seen_count + 1`；`term` 保留最近一次原文形态，展示以 `lemma` 为准。
@@ -455,13 +463,15 @@ dsh --profile web --dump-config      # 应出现 "# == dsh-word-vault" 且无 FA
 ```powershell
 cd D:\workout\deepseekharness\dsh-plugin\dsh-word-vault
 node --test test/words.test.mjs test/db.test.mjs test/capture.test.mjs test/index.test.mjs test/cards.test.mjs test/exam.test.mjs test/photos.test.mjs test/translate.test.mjs test/web.test.mjs test/client.test.mjs
-# 139 项:切词/词形还原、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
+# 152 项:切词/词形还原(含 -ing 名词与"复数即词条"白名单)、库 CRUD/撤销/改库/今日计数、宿主编排(点选/忽略/超时/autoCommit/翻译缓存)、
 #        插件契约与工具链路(含 P2 的 make_cards/export_cards)、记忆卡版式与转义、
+#        记忆卡例句字段与校验(缺例句/例句不含该词判不合格)、
 #        拆解质量闸门(逐字母硬拆判定/重试/保留标记)、真实 Edge 出 PDF+预览图、pandoc 出 Word、
-#        P3 考试(答案位置配额/撞义去重/原文句优先/掌握度升降/真 HTTP 答题服务/试卷导出)、
+#        P3 考试(答案位置配额/撞义去重/原文句优先(须过 isSimpleSentence 简单句门槛)/掌握度升降/真 HTTP 答题服务/试卷导出)、
 #        P4 照片扫描(合成图判据回归 + 真照片回归 + 按内容 hash 去重/限流/裁剪开关)、
 #        翻译分批与重试(整批失败不丢词)、高频词计次与高亮角标、P5 词库页面(分组计数/搜索排序/写操作/动作/页面脚本语法自检/HTTP 端到端)、
-#        使用说明页与设置表单(P5.3)、客户端设置面板(P5.4:内核契约/字段一致性守卫/主题变量)、
+#        使用说明页与设置表单(P5.3)、客户端设置面板(P5.4:内核契约/字段一致性守卫/主题变量/桌面壳入口须为绝对 http 地址)、
+#        发版闸门(npm pack 清单:scripts 脚本齐全 + README 嵌入的相对图片都在包里)、
 #        0.1.7 契约(导出 Config 且顶层为 object schema / 全字段 .volatile / 扁平入口归一化)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-clipboard.ps1
@@ -506,7 +516,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/helper-visual.ps1
 ## 13. 路线
 
 - **P1（已完成）** 剪贴板 + 点选弹窗录入、对话录入、翻译落库、查询统计、撤销/改库
-- **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗 → HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
+- **P2（已完成）** 记忆卡输出：选范围 → LLM 生成拆词 + 荒诞梗（**1.0.8 起再加一句 7 年级英文例句，取代原来的默写横线**）→ HTML / PDF（Edge headless）/ Word（pandoc）+ 首页预览图；沿用 workbuddy 专家包的卡片版式与「拆解三法」
 - **P3（已完成）** 考试闭环：英译汉单选（含该词的句子 + 单独问该词；干扰项同库同词性优先）→ 本地网页答题即时判分 → 连续 3 次答对打「已学会」、答错摘牌、已学会词 10% 抽样复查 → 可打印试卷
 - **P4（已完成）** 拍照通道：饱和色掩码 + 形状判据定位「被标记的印刷词」→ 联络图 → 模型只读印刷体入库（真实作业照片实测 p1 22 词 / p2 23 词）
 - **P5.1 / P5.2 / P5.3（已完成）** 词库界面：总览（四组视图 + 搜索排序 + 来源列）、写操作（改释义 / 手动掌握度 / 删除带影响预览）、动作（出记忆卡 / 在线答题 / 打印试卷 PDF）、使用说明页与设置表单；三个页面共用导航
